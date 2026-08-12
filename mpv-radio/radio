@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""CLI wrapper around mpv for streaming audio from saved preset URLs."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "mpv-radio"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+USAGE = """\
+usage: radio [preset]
+       radio add <name> <url>
+       radio remove <name>
+       radio default <name>
+       radio list
+
+With no arguments, streams the default preset.
+"""
+
+
+def load_config():
+    if not CONFIG_FILE.exists():
+        return {"default": None, "presets": {}}
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
+
+
+def save_config(config):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+def cmd_play(config, name):
+    presets = config.get("presets", {})
+    if name is None:
+        name = config.get("default")
+        if name is None:
+            sys.exit(
+                "No default preset set.\n"
+                "Add one with: radio add <name> <url>\n"
+                "Then set it as default with: radio default <name>"
+            )
+    if name not in presets:
+        sys.exit(f"Unknown preset '{name}'. Run 'radio list' to see available presets.")
+    url = presets[name]
+    os.execvp("mpv", ["mpv", "--no-video", url])
+
+
+def cmd_add(config, name, url):
+    config.setdefault("presets", {})[name] = url
+    if config.get("default") is None:
+        config["default"] = name
+    save_config(config)
+    print(f"Added preset '{name}' -> {url}")
+    if config["default"] == name:
+        print(f"'{name}' set as default (no default was set previously).")
+
+
+def cmd_remove(config, name):
+    presets = config.get("presets", {})
+    if name not in presets:
+        sys.exit(f"Unknown preset '{name}'.")
+    del presets[name]
+    if config.get("default") == name:
+        config["default"] = None
+    save_config(config)
+    print(f"Removed preset '{name}'.")
+
+
+def cmd_default(config, name):
+    presets = config.get("presets", {})
+    if name not in presets:
+        sys.exit(f"Unknown preset '{name}'. Run 'radio list' to see available presets.")
+    config["default"] = name
+    save_config(config)
+    print(f"Default preset set to '{name}'.")
+
+
+def cmd_list(config):
+    presets = config.get("presets", {})
+    default = config.get("default")
+    if not presets:
+        print("No presets configured. Add one with: radio add <name> <url>")
+        return
+    for name, url in presets.items():
+        marker = " (default)" if name == default else ""
+        print(f"{name}{marker}: {url}")
+
+
+def main():
+    args = sys.argv[1:]
+    config = load_config()
+
+    if not args:
+        cmd_play(config, None)
+        return
+
+    if args[0] in ("-h", "--help"):
+        print(USAGE, end="")
+        return
+
+    sub, rest = args[0], args[1:]
+
+    if sub == "add":
+        if len(rest) != 2:
+            sys.exit(USAGE)
+        cmd_add(config, rest[0], rest[1])
+    elif sub == "remove":
+        if len(rest) != 1:
+            sys.exit(USAGE)
+        cmd_remove(config, rest[0])
+    elif sub == "default":
+        if len(rest) != 1:
+            sys.exit(USAGE)
+        cmd_default(config, rest[0])
+    elif sub == "list":
+        cmd_list(config)
+    elif sub == "play":
+        cmd_play(config, rest[0] if rest else None)
+    else:
+        # Bare preset name shorthand: `radio <name>`
+        cmd_play(config, sub)
+
+
+if __name__ == "__main__":
+    main()
