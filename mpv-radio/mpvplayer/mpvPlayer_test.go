@@ -112,7 +112,7 @@ func TestSendCommand_writesJSONToSocket(t *testing.T) {
 	socketPath, commands := startFakeSocket(t)
 	player := &MpvPlayer{socketPath: socketPath}
 
-	if err := player.sendCommand("set-property", "pause", true); err != nil {
+	if _, err := player.sendCommand("set-property", "pause", true); err != nil {
 		t.Fatalf("sendCommand returned error: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestSendCommand_writesJSONToSocket(t *testing.T) {
 func TestSendCommand_connectionError(t *testing.T) {
 	player := &MpvPlayer{socketPath: tempSocketPath(t)}
 
-	if err := player.sendCommand("quit"); err == nil {
+	if _, err := player.sendCommand("quit"); err == nil {
 		t.Fatal("expected error connecting to nonexistent socket, got nil")
 	}
 }
@@ -132,7 +132,7 @@ func TestPause_sendsPauseTrue(t *testing.T) {
 	socketPath, commands := startFakeSocket(t)
 	player := &MpvPlayer{socketPath: socketPath}
 
-	if err := player.Pause(); err != nil {
+	if _, err := player.Pause(); err != nil {
 		t.Fatalf("pause returned error: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestResume_sendsPauseFalse(t *testing.T) {
 	socketPath, commands := startFakeSocket(t)
 	player := &MpvPlayer{socketPath: socketPath}
 
-	if err := player.Resume(); err != nil {
+	if _, err := player.Resume(); err != nil {
 		t.Fatalf("resume returned error: %v", err)
 	}
 

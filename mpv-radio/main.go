@@ -22,14 +22,8 @@ func readInput(keys chan string) {
 	close(keys)
 }
 
-func dispalyTitle(player *mpvplayer.MpvPlayer) error {
-
-	title, err := player.GetTitle()
-	if err == nil {
-		fmt.Printf("\tYou are listening to:\n\t%s\n\n", title)
-	}
-
-	return err
+func dispalyTitle(title string) {
+	fmt.Printf("\tYou are listening to:\n\t%s\n\n", title)
 }
 
 // reload quits the current mpv process and starts a fresh one on the same
@@ -49,9 +43,19 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	url := "https://www.youtube.com/watch?v=X4VbdwhkE10"
+	playlistUrl := "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"
 
-	player, err := mpvplayer.NewPlayer(ctx, url)
+	videos, err := mpvplayer.GetVideosFromPlaylist(playlistUrl)
+
+	if err != nil {
+		fmt.Printf("Could not resolve videos from playlist: %v", err)
+	}
+
+	curr := 0
+
+	// url := "https://www.youtube.com/watch?v=X4VbdwhkE10"
+
+	player, err := mpvplayer.NewPlayer(ctx, videos[curr].URL)
 	if err != nil {
 		fmt.Println("Could not start player:", err)
 		os.Exit(1)
@@ -64,7 +68,7 @@ func main() {
 		fmt.Printf("title: %s. err: %w\n", title, err)
 	}
 
-	dispalyTitle(player)
+	dispalyTitle(videos[curr].Title)
 
 	keys := make(chan string)
 	//continuously take in key presses into the channel "keys"
@@ -95,22 +99,18 @@ func main() {
 			}
 
 			if key == "R" {
-				newPlayer, err := reload(ctx, player, url)
+				newPlayer, err := reload(ctx, player, videos[curr].URL)
 				if err != nil {
 					fmt.Println("reload failed:", err)
 					continue
 				}
 				player = newPlayer
-				dispalyTitle(player)
+				dispalyTitle(videos[curr].Title)
 				continue
 			}
 
 			var cmdErr error
 			switch key {
-			case "p":
-				_, cmdErr = player.Pause()
-			case "r":
-				_, cmdErr = player.Resume()
 			case "t":
 				_, cmdErr = player.TogglePause()
 			case "+":
@@ -120,7 +120,36 @@ func main() {
 			case "q":
 				_, cmdErr = player.Quit()
 			case "k":
-				dispalyTitle(player)
+				dispalyTitle(videos[curr].Title)
+			case "n":
+				curr++
+				if curr == len(videos) {
+					curr = 0
+				}
+
+				newPlayer, err := reload(ctx, player, videos[curr].URL)
+				if err != nil {
+					fmt.Println("error changing channel:", err)
+					continue
+				}
+				player = newPlayer
+				dispalyTitle(videos[curr].Title)
+				continue
+			case "p":
+				curr--
+				if curr == -1 {
+					curr = len(videos) - 1
+				}
+
+				newPlayer, err := reload(ctx, player, videos[curr].URL)
+				if err != nil {
+					fmt.Println("error changing channel:", err)
+					continue
+				}
+				player = newPlayer
+				dispalyTitle(videos[curr].Title)
+				continue
+
 			default:
 				fmt.Println("unknown command:", key)
 				continue
