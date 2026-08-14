@@ -11,7 +11,7 @@ Making Lofi hiphop Radio an actual radio since 2026
 
 ### Features:
 - bubbletea TUI
-- playlist intake
+- ~~playlist intake~~
 
 
 ### Bugs and debt
