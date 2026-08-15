@@ -2,6 +2,14 @@
 
 Making Lofi hiphop Radio an actual radio since 2026
 
+# Usage
+```
+cd mpv-radio
+go run main.go
+```
+takes a seconnd to start, I've not added loading bars yet
+if it stops playing randomly, reload and wait for a moment
+
 ### Requirments
 - golang
 - [mpv.io](mpv.io)
@@ -9,16 +17,10 @@ Making Lofi hiphop Radio an actual radio since 2026
 
 ## TODO:
 
-### Features:
-- bubbletea TUI
-- ~~playlist intake~~
-
-
 ### Bugs and debt
-- Async, non-blocking socket traffic
+- Async handling of mpv traffic
+    - continuous intake of mpv signals to track loading times and errors
 - Logging
-- Background loop for reading updates from mpv
-- Improve video title handling
-- Expand mpv wrapper functionality
+- "next/prev" song command not working, currently replacing entire instance of mpv player
 
     
