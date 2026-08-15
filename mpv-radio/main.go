@@ -11,14 +11,15 @@ import (
 )
 
 type model struct {
-	player   *mpvplayer.MpvPlayer      //sub process handling audio streaming
-	selected int                       //which option is currently selected
-	ctx      context.Context           //context which manages killing the process
-	videos   []mpvplayer.PlaylistVideo //the list of currently loaded videos
-	vidIndex int                       //which video we're currently watching
-	loading  bool                      //whether or not we're loading the stream
-	choices  []string                  //choices for the interface
-	paused   bool                      //paused or playing?
+	player       *mpvplayer.MpvPlayer      //sub process handling audio streaming
+	selected     int                       //which option is currently selected
+	prevSelected int                       //handles going to the quit button
+	ctx          context.Context           //context which manages killing the process
+	videos       []mpvplayer.PlaylistVideo //the list of currently loaded videos
+	vidIndex     int                       //which video we're currently watching
+	loading      bool                      //whether or not we're loading the stream
+	choices      []string                  //choices for the interface
+	paused       bool                      //paused or playing?
 }
 
 func initialModel(ctx context.Context, playlist string) model {
@@ -141,6 +142,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected--
 			}
 
+		case "down":
+			if m.selected != 4 {
+				m.prevSelected = m.selected
+				m.selected = 4
+			}
+
+		case "up":
+			if m.selected == 4 {
+				m.selected = m.prevSelected
+			}
+
 		// select option
 		case "enter":
 			switch m.selected {
@@ -169,6 +181,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
+			case 4:
+				// graceful shutdown of the player and bubbletea
+				return m, tea.Sequence(quitPlayerCmd(m.player), tea.Quit)
 			}
 
 		}
@@ -202,8 +217,15 @@ func (m model) View() tea.View {
 		s += fmt.Sprintf("|%s%s%s|", l, choice, r)
 	}
 
+	l := " "
+	r := " "
+	if m.selected == 4 {
+		l = "["
+		r = "]"
+	}
+
 	//footer
-	s += "\n\nq to quit\n"
+	s += fmt.Sprintf("\n\n%squit%s\n", l, r)
 
 	//I suppose that means bubblettea understands the entire view as a string
 	return tea.NewView(s)
