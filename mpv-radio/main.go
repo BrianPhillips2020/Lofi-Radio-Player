@@ -1,162 +1,227 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
+	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
 
-	"lofi-radio/mpvplayer"
+	tea "charm.land/bubbletea/v2"
 )
 
-// readInput continuously reads lines from stdin into keys, closing keys when stdin is exhausted.
-func readInput(keys chan string) {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		keys <- scanner.Text()
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Println("stdin read error:", err)
-	}
-	close(keys)
+type model struct {
+	player   *mpvplayer.MpvPlayer      //sub process handling audio streaming
+	selected int                       //which option is currently selected
+	ctx      context.Context           //context which manages killing the process
+	videos   []mpvplayer.PlaylistVideo //the list of currently loaded videos
+	vidIndex int                       //which video we're currently watching
+	loading  bool                      //whether or not we're loading the stream
+	choices  []string                  //choices for the interface
+	paused   bool                      //paused or playing?
 }
 
-func dispalyTitle(title string) {
-	fmt.Printf("\tYou are listening to:\n\t%s\n\n", title)
-}
+func initialModel(ctx context.Context, playlist string) model {
 
-// reload quits the current mpv process and starts a fresh one on the same
-// url, returning the new player once it's up.
-func reload(ctx context.Context, player *mpvplayer.MpvPlayer, url string) (*mpvplayer.MpvPlayer, error) {
-	if _, err := player.Quit(); err != nil {
-		return nil, fmt.Errorf("could not quit player for reload: %w", err)
+	videos, err := mpvplayer.GetVideosFromPlaylist(playlist)
+
+	if err != nil {
+		fmt.Errorf("Initialization error: %v", err)
 	}
 
-	// wait for the old process to fully exit so its goroutine/socket clean up
-	<-player.Done()
+	var firstUrl string
+	if len(videos) > 0 {
+		firstUrl = videos[0].URL
+	}
 
-	return mpvplayer.NewPlayer(ctx, url)
+	player, err := mpvplayer.NewPlayer(ctx, firstUrl)
+
+	if err != nil {
+		fmt.Errorf("Initialization error: %v", err)
+	}
+
+	return model{
+		player:   player,
+		videos:   videos,
+		ctx:      ctx,
+		vidIndex: 0,
+		choices:  []string{"<<", "pause", "reload", ">>"},
+		paused:   false,
+	}
+
+}
+
+type playlistLoaderMsg struct {
+	videos []mpvplayer.PlaylistVideo
+	err    error
+}
+
+type playerChangedMsg struct {
+	player *mpvplayer.MpvPlayer
+	err    error
+}
+
+// Bubbletea Commands
+// -------------------------------------
+
+func loadPlaylistCmd(ctx context.Context, url string) tea.Cmd {
+	return func() tea.Msg {
+		videos, err := mpvplayer.GetVideosFromPlaylist(url)
+		return playlistLoaderMsg{videos, err}
+	}
+}
+
+func quitPlayerCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		player.Quit()
+		<-player.Done()
+		return nil
+	}
+}
+
+func newPlayerCmd(ctx context.Context, player *mpvplayer.MpvPlayer, url string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := player.Quit(); err != nil {
+			return playerChangedMsg{err: fmt.Errorf("could not quit player: %w", err)}
+		}
+
+		// wait for the old process to fully exit so its goroutine/socket clean up
+		<-player.Done()
+
+		newPlayer, err := mpvplayer.NewPlayer(ctx, url)
+		return playerChangedMsg{player: newPlayer, err: err}
+	}
+}
+
+func togglePlayCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		player.TogglePause()
+		return nil
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L")
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case playlistLoaderMsg:
+		if msg.err != nil {
+			m.loading = false
+			return m, nil
+		}
+
+		m.videos = msg.videos
+		m.loading = false
+
+	case playerChangedMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		m.player = msg.player
+
+	case tea.KeyPressMsg:
+
+		switch msg.String() {
+		case "ctrl+c", "q":
+			// graceful shutdown of the player and bubbletea
+			return m, tea.Sequence(quitPlayerCmd(m.player), tea.Quit)
+
+		// move selector arrow right
+		case "right":
+			if m.selected < len(m.choices)-1 {
+				m.selected++
+			}
+
+		// move selector arrow left
+		case "left":
+			if m.selected > 0 {
+				m.selected--
+			}
+
+		// select option
+		case "enter":
+			switch m.selected {
+			// select prev station
+			case 0:
+				m.vidIndex--
+				if m.vidIndex < 0 {
+					m.vidIndex = len(m.videos) - 1
+				}
+				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+
+			// select toggle pause
+			case 1:
+				m.paused = !m.paused
+				return m, togglePlayCmd(m.player)
+
+			// select reload player
+			case 2:
+				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+
+			// select next song
+			case 3:
+				m.vidIndex++
+				if m.vidIndex == len(m.videos) {
+					m.vidIndex = 0
+				}
+				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+
+			}
+
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() tea.View {
+	s := "\tYou are listening to:\n"
+	if m.vidIndex < len(m.videos) {
+		s += m.videos[m.vidIndex].Title + "\n\n"
+	} else {
+		s += "loading...\n\n\n"
+	}
+
+	for i, choice := range m.choices {
+		l := " "
+		r := " "
+		if m.selected == i {
+			l = "["
+			r = "]"
+		}
+
+		if i == 1 {
+			if !m.paused {
+				choice = "play"
+			} else {
+				choice = "pause"
+			}
+		}
+		s += fmt.Sprintf("|%s%s%s|", l, choice, r)
+	}
+
+	//footer
+	s += "\n\nq to quit\n"
+
+	//I suppose that means bubblettea understands the entire view as a string
+	return tea.NewView(s)
+
 }
 
 func main() {
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	playlistUrl := "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"
 
-	videos, err := mpvplayer.GetVideosFromPlaylist(playlistUrl)
+	p := tea.NewProgram(initialModel(ctx, playlistUrl))
 
-	if err != nil {
-		fmt.Printf("Could not resolve videos from playlist: %v", err)
-	}
-
-	curr := 0
-
-	// url := "https://www.youtube.com/watch?v=X4VbdwhkE10"
-
-	player, err := mpvplayer.NewPlayer(ctx, videos[curr].URL)
-	if err != nil {
-		fmt.Println("Could not start player:", err)
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("ha you suck: %v", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("Playing. Commands: p = pause, r = resume, t = toggle pause, + = volume up, - = volume down, R = reload, q = quit")
-
-	title, err := player.GetTitle()
-	if err != nil {
-		fmt.Printf("title: %s. err: %w\n", title, err)
-	}
-
-	dispalyTitle(videos[curr].Title)
-
-	keys := make(chan string)
-	//continuously take in key presses into the channel "keys"
-	go readInput(keys)
-
-	// for loop here blocks on the `select` statement continuously
-	for {
-		// blocks on input from one of the options. user input, mpv process ending, or ctrl+C from the user
-		select {
-
-		case err := <-player.Done():
-			if err != nil {
-				fmt.Println("mpv exited with error:", err)
-			} else {
-				fmt.Println("Playback finished")
-			}
-			return
-
-		case <-ctx.Done():
-			fmt.Println("Interrupted, stopping mpv")
-			player.Quit()
-			<-player.Done()
-			return
-
-		case key, ok := <-keys:
-			if !ok {
-				return
-			}
-
-			if key == "R" {
-				newPlayer, err := reload(ctx, player, videos[curr].URL)
-				if err != nil {
-					fmt.Println("reload failed:", err)
-					continue
-				}
-				player = newPlayer
-				dispalyTitle(videos[curr].Title)
-				continue
-			}
-
-			var cmdErr error
-			switch key {
-			case "t":
-				_, cmdErr = player.TogglePause()
-			case "+":
-				_, cmdErr = player.VolumeUp()
-			case "-":
-				_, cmdErr = player.VolumeDown()
-			case "q":
-				_, cmdErr = player.Quit()
-			case "k":
-				dispalyTitle(videos[curr].Title)
-			case "n":
-				curr++
-				if curr == len(videos) {
-					curr = 0
-				}
-
-				newPlayer, err := reload(ctx, player, videos[curr].URL)
-				if err != nil {
-					fmt.Println("error changing channel:", err)
-					continue
-				}
-				player = newPlayer
-				dispalyTitle(videos[curr].Title)
-				continue
-			case "p":
-				curr--
-				if curr == -1 {
-					curr = len(videos) - 1
-				}
-
-				newPlayer, err := reload(ctx, player, videos[curr].URL)
-				if err != nil {
-					fmt.Println("error changing channel:", err)
-					continue
-				}
-				player = newPlayer
-				dispalyTitle(videos[curr].Title)
-				continue
-
-			default:
-				fmt.Println("unknown command:", key)
-				continue
-			}
-			if cmdErr != nil {
-				fmt.Println("command failed:", cmdErr)
-			}
-		}
-	}
 }

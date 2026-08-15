@@ -2,6 +2,7 @@ package mpvplayer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -162,6 +163,9 @@ func (p *MpvPlayer) VolumeDown() (string, error) { return p.sendCommand("add", "
 
 func (p *MpvPlayer) Quit() (string, error) { return p.sendCommand("quit") }
 
+func (p *MpvPlayer) NextSong() (string, error) { return p.sendCommand("playlist-next") }
+func (p *MpvPlayer) PrevSong() (string, error) { return p.sendCommand("playlist-prev") }
+
 // GetTitle returns mpv's media-title. For sources like YouTube, mpv resolves
 // the real title asynchronously (via yt-dlp) shortly after playback starts,
 // so this retries until the title differs from the raw url or retries run out.
@@ -189,3 +193,43 @@ func (p *MpvPlayer) GetTitle() (string, error) {
 // once the process ends, whether from Quit, an external kill, or finishing
 // playback on its own.
 func (p *MpvPlayer) Done() <-chan error { return p.done }
+
+// Playlist resolution
+//----------------------------------------------
+
+// PlaylistVideo is the subset of fields yt-dlp prints per line
+type PlaylistVideo struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
+}
+
+func GetVideosFromPlaylist(url string) ([]PlaylistVideo, error) {
+
+	// yt-dlp -j prints one JSON object per line, one per playlist entry
+	cmd := exec.Command("yt-dlp", "--flat-playlist", "-j", url)
+
+	result, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	split := bytes.Split(result, []byte("\n"))
+
+	videos := make([]PlaylistVideo, 0, len(split))
+
+	for _, line := range split {
+
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var video PlaylistVideo
+		if err := json.Unmarshal(line, &video); err != nil {
+			return nil, err
+		}
+
+		videos = append(videos, video)
+	}
+
+	return videos, nil
+}

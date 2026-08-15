@@ -72,6 +72,16 @@ func startFakeSocket(t *testing.T) (string, <-chan map[string]any) {
 			var cmd map[string]any
 			if err := json.Unmarshal(scanner.Bytes(), &cmd); err == nil {
 				commands <- cmd
+
+				// mimic mpv's reply so sendCommand's response read doesn't block
+				resp, err := json.Marshal(map[string]any{
+					"request_id": cmd["request_id"],
+					"error":      "success",
+				})
+				if err != nil {
+					continue
+				}
+				conn.Write(append(resp, '\n'))
 			}
 		}
 	}()
