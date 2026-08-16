@@ -48,10 +48,13 @@ func initialModel(ctx context.Context, playlist string) model {
 		vidIndex: 0,
 		choices:  []string{"<<", "pause", "reload", ">>"},
 		paused:   false,
+		loading:  true,
 	}
 
 }
 
+// Bubbletea Msg types
+// ------------------------------------
 type playlistLoaderMsg struct {
 	videos []mpvplayer.PlaylistVideo
 	err    error
@@ -60,6 +63,10 @@ type playlistLoaderMsg struct {
 type playerChangedMsg struct {
 	player *mpvplayer.MpvPlayer
 	err    error
+}
+
+type playerLoadedMsg struct {
+	err error
 }
 
 // Bubbletea Commands
@@ -101,8 +108,17 @@ func togglePlayCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 	}
 }
 
+func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		return playerLoadedMsg{err: player.HasPlaybackBegun(ctx)}
+	}
+}
+
 func (m model) Init() tea.Cmd {
-	return loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L")
+	return tea.Batch(
+		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
+		loadingRadioCmd(m.ctx, m.player),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -122,6 +138,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.player = msg.player
+		m.loading = true
+		return m, loadingRadioCmd(m.ctx, m.player)
+
+	case playerLoadedMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		m.loading = false
 
 	case tea.KeyPressMsg:
 
@@ -162,6 +186,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.vidIndex < 0 {
 					m.vidIndex = len(m.videos) - 1
 				}
+				m.loading = true
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
 			// select toggle pause
@@ -171,6 +196,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// select reload player
 			case 2:
+				m.loading = true
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
 			// select next song
@@ -179,6 +205,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.vidIndex == len(m.videos) {
 					m.vidIndex = 0
 				}
+				m.loading = true
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
 			case 4:
@@ -192,6 +219,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
+
+	if m.loading {
+		return tea.NewView("loading...")
+	}
+
 	s := "\tYou are listening to:\n"
 	if m.vidIndex < len(m.videos) {
 		s += m.videos[m.vidIndex].Title + "\n\n"

@@ -128,6 +128,48 @@ func (p *MpvPlayer) sendCommand(args ...any) (string, error) {
 	}
 }
 
+// Opens a connection and checks for the `playback-restart` message
+// Which should signal that the audio playback has started
+func (p *MpvPlayer) HasPlaybackBegun(ctx context.Context) error {
+
+	conn, err := connectWithRetry(p.socketPath, 10)
+
+	if err != nil {
+		return err
+	}
+
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	for {
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("error reading mpv response: %w", err)
+		}
+
+		// mpv.io json response struct
+		var evt struct {
+			Event string `json:"event"`
+		}
+
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+
+		if evt.Event == "playback-restart" {
+			return nil
+		}
+	}
+}
+
 // create the socket connection, retry maxRetries number of times if failed
 func connectWithRetry(socketPath string, maxRetries int) (net.Conn, error) {
 	var conn net.Conn
