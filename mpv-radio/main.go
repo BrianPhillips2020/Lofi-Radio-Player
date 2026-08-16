@@ -6,6 +6,7 @@ import (
 	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -69,8 +70,16 @@ type playerLoadedMsg struct {
 	err error
 }
 
+type tickMsg time.Time
+
 // Bubbletea Commands
 // -------------------------------------
+
+func ticketCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
 
 func loadPlaylistCmd(ctx context.Context, url string) tea.Cmd {
 	return func() tea.Msg {
@@ -118,11 +127,15 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player),
+		ticketCmd(),
 	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	case tickMsg:
+		return m, ticketCmd()
 
 	case playlistLoaderMsg:
 		if msg.err != nil {
@@ -220,17 +233,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 
+	// player header
+	header := "\n--------Lofi Radio--------\n\n"
+
+	//main display section
+	var display string
+
 	if m.loading {
-		return tea.NewView("loading...")
-	}
-
-	s := "\tYou are listening to:\n"
-	if m.vidIndex < len(m.videos) {
-		s += m.videos[m.vidIndex].Title + "\n\n"
+		display = "loading...\n\n\n"
 	} else {
-		s += "loading...\n\n\n"
+		display += "\tYou are listening to:\n"
+		if m.vidIndex < len(m.videos) {
+			display += m.videos[m.vidIndex].Title + "\n\n"
+		} else {
+			display += "loading...\n\n\n"
+		}
 	}
 
+	options := ""
 	for i, choice := range m.choices {
 		l := " "
 		r := " "
@@ -241,12 +261,17 @@ func (m model) View() tea.View {
 
 		if i == 1 {
 			if !m.paused {
-				choice = "play"
-			} else {
 				choice = "pause"
+			} else {
+				blink := time.Now().UnixMilli()/500%2 == 0
+				if blink {
+					choice = "play"
+				} else {
+					choice = "    "
+				}
 			}
 		}
-		s += fmt.Sprintf("|%s%s%s|", l, choice, r)
+		options += fmt.Sprintf("|%s%s%s|", l, choice, r)
 	}
 
 	l := " "
@@ -257,10 +282,10 @@ func (m model) View() tea.View {
 	}
 
 	//footer
-	s += fmt.Sprintf("\n\n%squit%s\n", l, r)
+	options += fmt.Sprintf("\n\n%squit%s\n", l, r)
 
 	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(s)
+	return tea.NewView(header + display + options)
 
 }
 
