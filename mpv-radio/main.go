@@ -2,16 +2,24 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
 	"time"
 
+	//bubbletea deps
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
+//go:embed ascii/lofi-hiphop.txt
+var headerArt string
+
 type model struct {
+	styles       *styles
 	player       *mpvplayer.MpvPlayer      //sub process handling audio streaming
 	selected     int                       //which option is currently selected
 	prevSelected int                       //handles going to the quit button
@@ -21,6 +29,34 @@ type model struct {
 	loading      bool                      //whether or not we're loading the stream
 	choices      []string                  //choices for the interface
 	paused       bool                      //paused or playing?
+	clear        bool
+	spinner      spinner.Model
+}
+
+type styles struct {
+	cutOffText,
+	loading,
+	display,
+	selected,
+	buttonUnselected,
+	spinStyle,
+	frame,
+	text lipgloss.Style
+	// buttons lipgloss.Style
+}
+
+func newStyles() (s *styles) {
+	s = new(styles)
+	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
+	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
+	s.frame = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45)
+	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
+	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(-1).Align(lipgloss.Center)
+	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(1).Align(lipgloss.Center)
+	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
+	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
+	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder())
+	return s
 }
 
 func initialModel(ctx context.Context, playlist string) model {
@@ -43,6 +79,7 @@ func initialModel(ctx context.Context, playlist string) model {
 	}
 
 	return model{
+		styles:   newStyles(),
 		player:   player,
 		videos:   videos,
 		ctx:      ctx,
@@ -50,6 +87,8 @@ func initialModel(ctx context.Context, playlist string) model {
 		choices:  []string{"<<", "pause", "reload", ">>"},
 		paused:   false,
 		loading:  true,
+		clear:    false,
+		spinner:  spinner.New(spinner.WithSpinner(spinner.Dot)),
 	}
 
 }
@@ -72,6 +111,10 @@ type playerLoadedMsg struct {
 
 type tickMsg time.Time
 
+type quitMsg struct {
+	err error
+}
+
 // Bubbletea Commands
 // -------------------------------------
 
@@ -92,7 +135,7 @@ func quitPlayerCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 	return func() tea.Msg {
 		player.Quit()
 		<-player.Done()
-		return nil
+		return quitMsg{}
 	}
 }
 
@@ -125,6 +168,7 @@ func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
+		m.spinner.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player),
 		ticketCmd(),
@@ -160,12 +204,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = false
 
+	case quitMsg:
+		m.clear = true
+		return m, tea.ClearScreen
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
 	case tea.KeyPressMsg:
 
 		switch msg.String() {
 		case "ctrl+c", "q":
 			// graceful shutdown of the player and bubbletea
-			return m, tea.Sequence(quitPlayerCmd(m.player), tea.Quit)
+			return m, tea.Sequence(quitPlayerCmd(m.player), tea.ClearScreen, tea.Quit)
 
 		// move selector arrow right
 		case "right":
@@ -179,16 +232,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected--
 			}
 
-		case "down":
-			if m.selected != 4 {
-				m.prevSelected = m.selected
-				m.selected = 4
-			}
+		// case "down":
+		// 	if m.selected != 4 {
+		// 		m.prevSelected = m.selected
+		// 		m.selected = 4
+		// 	}
 
-		case "up":
-			if m.selected == 4 {
-				m.selected = m.prevSelected
-			}
+		// case "up":
+		// 	if m.selected == 4 {
+		// 		m.selected = m.prevSelected
+		// 	}
 
 		// select option
 		case "enter":
@@ -221,9 +274,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
-			case 4:
-				// graceful shutdown of the player and bubbletea
-				return m, tea.Sequence(quitPlayerCmd(m.player), tea.Quit)
+				// case 4:
+				// 	// graceful shutdown of the player and bubbletea
+				// 	return m, tea.Sequence(quitPlayerCmd(m.player), tea.ClearScreen, tea.Quit)
 			}
 
 		}
@@ -233,30 +286,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 
+	if m.clear {
+		return tea.NewView("")
+	}
 	// player header
-	header := "\n--------Lofi Radio--------\n\n"
+	// header := "\n--------Lofi Radio--------\n\n"
+
+	// header := m.styles.text.Render(headerArt)
 
 	//main display section
 	var display string
-
+	var displayStyle lipgloss.Style
 	if m.loading {
-		display = "loading...\n\n\n"
+		display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
+		displayStyle = m.styles.loading
 	} else {
-		display += "\tYou are listening to:\n"
 		if m.vidIndex < len(m.videos) {
-			display += m.videos[m.vidIndex].Title + "\n\n"
+			display += m.styles.cutOffText.Render(m.videos[m.vidIndex].Title)
+			displayStyle = m.styles.display
 		} else {
-			display += "loading...\n\n\n"
+			display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
+			displayStyle = m.styles.loading
 		}
 	}
 
-	options := ""
+	display = "\n" + displayStyle.Render(display) + "\n"
+
+	buttons := make([]string, 0, len(m.choices))
 	for i, choice := range m.choices {
-		l := " "
-		r := " "
+
+		// determine button style
+		style := m.styles.buttonUnselected
 		if m.selected == i {
-			l = "["
-			r = "]"
+			style = m.styles.selected
 		}
 
 		if i == 1 {
@@ -271,21 +333,23 @@ func (m model) View() tea.View {
 				}
 			}
 		}
-		options += fmt.Sprintf("|%s%s%s|", l, choice, r)
+		buttons = append(buttons, style.Render(fmt.Sprintf("%s", choice)))
 	}
 
-	l := " "
-	r := " "
-	if m.selected == 4 {
-		l = "["
-		r = "]"
-	}
+	// style := m.styles.buttonUnselected
+	// if m.selected == 4 {
+	// 	style = m.styles.selected
+	// }
 
 	//footer
-	options += fmt.Sprintf("\n\n%squit%s\n", l, r)
+	options := lipgloss.NewStyle().Width(m.styles.frame.GetWidth()).Align(lipgloss.Center).Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
+
+	text := display + options
+
+	result := m.styles.frame.Render(text)
 
 	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(header + display + options)
+	return tea.NewView(result)
 
 }
 
