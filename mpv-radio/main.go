@@ -18,6 +18,8 @@ import (
 //go:embed ascii/lofi-hiphop.txt
 var headerArt string
 
+const debugFile = "mpv-debug.log"
+
 type model struct {
 	styles       *styles
 	player       *mpvplayer.MpvPlayer      //sub process handling audio streaming
@@ -115,6 +117,10 @@ type quitMsg struct {
 	err error
 }
 
+type playbackErrorMsg struct {
+	err error
+}
+
 // Bubbletea Commands
 // -------------------------------------
 
@@ -141,7 +147,7 @@ func quitPlayerCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 
 func newPlayerCmd(ctx context.Context, player *mpvplayer.MpvPlayer, url string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := player.Quit(); err != nil {
+		if err := player.Quit(); err != nil {
 			return playerChangedMsg{err: fmt.Errorf("could not quit player: %w", err)}
 		}
 
@@ -163,6 +169,12 @@ func togglePlayCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
 	return func() tea.Msg {
 		return playerLoadedMsg{err: player.HasPlaybackBegun(ctx)}
+	}
+}
+
+func watchForAudioFailureCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		return playbackErrorMsg{err: player.WatchStdout(ctx, "HTTP error")}
 	}
 }
 
@@ -203,6 +215,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = false
+		return m, watchForAudioFailureCmd(m.ctx, m.player)
+
+	case playbackErrorMsg:
+		if msg.err != nil {
+			return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+		}
 
 	case quitMsg:
 		m.clear = true
