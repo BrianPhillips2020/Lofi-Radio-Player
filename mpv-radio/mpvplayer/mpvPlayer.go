@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -29,6 +31,13 @@ type MpvPlayer struct {
 	// the url passed to mpv, used to detect when media-title hasn't
 	// resolved yet (e.g. youtube titles resolved async via yt-dlp)
 	url string
+
+	// The stdout of the player command
+	cmdOut io.ReadCloser
+
+	// streams each line of cmdOut as it's read by WatchForInterrupt, so
+	// callers can display the raw player output live
+	logs chan string
 }
 
 // Return a new Player. ctx controls the mpv process's lifetime: canceling
@@ -41,6 +50,12 @@ func NewPlayer(ctx context.Context, url string) (*MpvPlayer, error) {
 
 	cmd := exec.CommandContext(ctx, "mpv", "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 
+	// Must be set before cmd is started
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Errorf("Error getting player out: %v", err)
+	}
+
 	//ensures child process isolated from parent processing
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -48,10 +63,14 @@ func NewPlayer(ctx context.Context, url string) (*MpvPlayer, error) {
 		return nil, err
 	}
 
-	player := &MpvPlayer{cmd: cmd, socketPath: socketPath, done: make(chan error), url: url}
+	player := &MpvPlayer{cmd: cmd, socketPath: socketPath, done: make(chan error), url: url, cmdOut: out, logs: make(chan string, 100)}
 
 	go func() {
+		// send once for the first waiter, then close so any later callers
+		// to Done() (e.g. a stale WatchForInterrupt racing a manual reload)
+		// get an immediate zero value instead of blocking forever
 		player.done <- cmd.Wait()
+		close(player.done)
 		os.Remove(socketPath)
 	}()
 
@@ -236,6 +255,11 @@ func (p *MpvPlayer) GetTitle() (string, error) {
 // playback on its own.
 func (p *MpvPlayer) Done() <-chan error { return p.done }
 
+// Logs returns a channel that receives each line of the player's stdout as
+// WatchForInterrupt reads it. The channel is closed when WatchForInterrupt
+// returns.
+func (p *MpvPlayer) Logs() <-chan string { return p.logs }
+
 // Playlist resolution
 //----------------------------------------------
 
@@ -274,4 +298,35 @@ func GetVideosFromPlaylist(url string) ([]PlaylistVideo, error) {
 	}
 
 	return videos, nil
+}
+
+// ErrPlaybackInterrupted is returned by WatchForInterrupt when it detects an
+// "HTTP error 403" line, as opposed to the player's stdout simply closing
+// because the player was quit deliberately (e.g. for a manual reload).
+var ErrPlaybackInterrupted = errors.New("playback interrupted")
+
+func (player *MpvPlayer) WatchForInterrupt(ctx context.Context) error {
+	defer close(player.logs)
+
+	scanner := bufio.NewScanner(player.cmdOut)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		text := scanner.Text()
+
+		// non-blocking send: drop the line rather than stall reading if
+		// nobody's listening or the buffer's full
+		select {
+		case player.logs <- text:
+		default:
+		}
+
+		if strings.Contains(text, "HTTP error 403") {
+			return ErrPlaybackInterrupted
+		}
+	}
+
+	return scanner.Err()
 }

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	//bubbletea deps
@@ -15,8 +17,11 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-//go:embed ascii/lofi-hiphop.txt
-var headerArt string
+// number of most-recent player log lines kept for display
+const maxLogLines = 4
+
+// //go:embed ascii/lofi-hiphop.txt
+// var headerArt string
 
 type model struct {
 	styles       *styles
@@ -31,6 +36,7 @@ type model struct {
 	paused       bool                      //paused or playing?
 	clear        bool
 	spinner      spinner.Model
+	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
 }
 
 type styles struct {
@@ -41,6 +47,7 @@ type styles struct {
 	buttonUnselected,
 	spinStyle,
 	frame,
+	logs,
 	text lipgloss.Style
 	// buttons lipgloss.Style
 }
@@ -49,13 +56,14 @@ func newStyles() (s *styles) {
 	s = new(styles)
 	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
 	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	s.frame = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45)
+	s.frame = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
 	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
 	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(-1).Align(lipgloss.Center)
 	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(1).Align(lipgloss.Center)
 	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
 	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
 	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder())
+	s.logs = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(s.frame.GetHeight())
 	return s
 }
 
@@ -64,7 +72,7 @@ func initialModel(ctx context.Context, playlist string) model {
 	videos, err := mpvplayer.GetVideosFromPlaylist(playlist)
 
 	if err != nil {
-		fmt.Errorf("Initialization error: %v", err)
+		fmt.Printf("Initialization error: %v", err)
 	}
 
 	var firstUrl string
@@ -75,7 +83,7 @@ func initialModel(ctx context.Context, playlist string) model {
 	player, err := mpvplayer.NewPlayer(ctx, firstUrl)
 
 	if err != nil {
-		fmt.Errorf("Initialization error: %v", err)
+		fmt.Printf("Initialization error: %v", err)
 	}
 
 	return model{
@@ -114,6 +122,13 @@ type tickMsg time.Time
 type quitMsg struct {
 	err error
 }
+
+type playbackInterruptMsg struct {
+	err error
+}
+
+// logLineMsg carries one line read from the player's stdout by WatchForInterrupt
+type logLineMsg string
 
 // Bubbletea Commands
 // -------------------------------------
@@ -166,11 +181,30 @@ func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
 	}
 }
 
+func playerReconnectCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		return playbackInterruptMsg{err: player.WatchForInterrupt(ctx)}
+	}
+}
+
+// listenLogsCmd waits for the next line the player emits and re-issues
+// itself so the model keeps draining player.Logs() one line at a time.
+func listenLogsCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-player.Logs()
+		if !ok {
+			return nil
+		}
+		return logLineMsg(line)
+	}
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player),
+		listenLogsCmd(m.player),
 		ticketCmd(),
 	)
 }
@@ -196,13 +230,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.player = msg.player
 		m.loading = true
-		return m, loadingRadioCmd(m.ctx, m.player)
+		return m, tea.Batch(loadingRadioCmd(m.ctx, m.player), listenLogsCmd(m.player))
+
+	case logLineMsg:
+		m.logLines = append(m.logLines, string(msg))
+		if len(m.logLines) > maxLogLines {
+			m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
+		}
+		return m, listenLogsCmd(m.player)
 
 	case playerLoadedMsg:
 		if msg.err != nil {
 			return m, nil
 		}
 		m.loading = false
+		return m, playerReconnectCmd(m.ctx, m.player)
 
 	case quitMsg:
 		m.clear = true
@@ -212,6 +254,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	case playbackInterruptMsg:
+		// stdout can also close because we deliberately quit the player
+		// (manual reload/next/prev); only auto-reconnect on a real 403
+		if !errors.Is(msg.err, mpvplayer.ErrPlaybackInterrupted) {
+			return m, nil
+		}
+		m.loading = true
+		return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
 	case tea.KeyPressMsg:
 
@@ -348,8 +399,10 @@ func (m model) View() tea.View {
 
 	result := m.styles.frame.Render(text)
 
+	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
+
 	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(result)
+	return tea.NewView(lipgloss.JoinHorizontal(lipgloss.Top, result, logs))
 
 }
 
