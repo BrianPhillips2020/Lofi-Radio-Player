@@ -43,10 +43,10 @@ type MpvPlayer struct {
 // Return a new Player. ctx controls the mpv process's lifetime: canceling
 // it kills mpv. Callers typically pass a context tied to program shutdown
 // (e.g. signal.NotifyContext), not one that's canceled right away.
-func NewPlayer(ctx context.Context, url string) (*MpvPlayer, error) {
+func NewPlayer(ctx context.Context, url string, id int) (*MpvPlayer, error) {
 
 	// sets the path for communicating with mpv
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("mpvsocket-%d.sock", os.Getpid()))
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("mpvsocket-%d-%d.sock", os.Getpid(), id))
 
 	cmd := exec.CommandContext(ctx, "mpv", "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	//bubbletea deps
@@ -20,12 +21,15 @@ import (
 // number of most-recent player log lines kept for display
 const maxLogLines = 4
 
+var nextPlayerId atomic.Int64
+
 // //go:embed ascii/lofi-hiphop.txt
 // var headerArt string
 
 type model struct {
 	styles       *styles
 	player       *mpvplayer.MpvPlayer      //sub process handling audio streaming
+	tempPlayer   *mpvplayer.MpvPlayer      //temp player holder
 	selected     int                       //which option is currently selected
 	prevSelected int                       //handles going to the quit button
 	ctx          context.Context           //context which manages killing the process
@@ -50,6 +54,15 @@ type styles struct {
 	logs,
 	text lipgloss.Style
 	// buttons lipgloss.Style
+}
+
+// appendLog records a line for the on-screen log pane, keeping only the
+// most recent maxLogLines.
+func (m *model) appendLog(line string) {
+	m.logLines = append(m.logLines, line)
+	if len(m.logLines) > maxLogLines {
+		m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
+	}
 }
 
 func newStyles() (s *styles) {
@@ -80,7 +93,7 @@ func initialModel(ctx context.Context, playlist string) model {
 		firstUrl = videos[0].URL
 	}
 
-	player, err := mpvplayer.NewPlayer(ctx, firstUrl)
+	player, err := mpvplayer.NewPlayer(ctx, firstUrl, int(nextPlayerId.Add(1)))
 
 	if err != nil {
 		fmt.Printf("Initialization error: %v", err)
@@ -127,6 +140,15 @@ type playbackInterruptMsg struct {
 	err error
 }
 
+type tempPlayerCreatedMsg struct {
+	tempPlayer *mpvplayer.MpvPlayer
+	err        error
+}
+
+type tempPlayerLoadedMsg struct {
+	err error
+}
+
 // logLineMsg carries one line read from the player's stdout by WatchForInterrupt
 type logLineMsg string
 
@@ -154,6 +176,17 @@ func quitPlayerCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 	}
 }
 
+// quitStalePlayerCmd retires a player that's no longer m.player (the old
+// player after a background swap, or a temp player that failed to load)
+// without emitting quitMsg, which is reserved for full app shutdown.
+func quitStalePlayerCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
+	return func() tea.Msg {
+		player.Quit()
+		<-player.Done()
+		return nil
+	}
+}
+
 func newPlayerCmd(ctx context.Context, player *mpvplayer.MpvPlayer, url string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := player.Quit(); err != nil {
@@ -163,9 +196,18 @@ func newPlayerCmd(ctx context.Context, player *mpvplayer.MpvPlayer, url string) 
 		// wait for the old process to fully exit so its goroutine/socket clean up
 		<-player.Done()
 
-		newPlayer, err := mpvplayer.NewPlayer(ctx, url)
+		newPlayer, err := mpvplayer.NewPlayer(ctx, url, int(nextPlayerId.Add(1)))
 		return playerChangedMsg{player: newPlayer, err: err}
 	}
+}
+
+// Load a new temporary player
+func newTempPlayerCmd(ctx context.Context, url string) tea.Cmd {
+	return func() tea.Msg {
+		tempPlayer, err := mpvplayer.NewPlayer(ctx, url, int(nextPlayerId.Add(1)))
+		return tempPlayerCreatedMsg{tempPlayer: tempPlayer, err: err}
+	}
+
 }
 
 func togglePlayCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
@@ -175,9 +217,12 @@ func togglePlayCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 	}
 }
 
-func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer) tea.Cmd {
+func loadingRadioCmd(ctx context.Context, player *mpvplayer.MpvPlayer, temp bool) tea.Cmd {
 	return func() tea.Msg {
-		return playerLoadedMsg{err: player.HasPlaybackBegun(ctx)}
+		if !temp {
+			return playerLoadedMsg{err: player.HasPlaybackBegun(ctx)}
+		}
+		return tempPlayerLoadedMsg{err: player.HasPlaybackBegun(ctx)}
 	}
 }
 
@@ -203,7 +248,7 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
-		loadingRadioCmd(m.ctx, m.player),
+		loadingRadioCmd(m.ctx, m.player, false),
 		listenLogsCmd(m.player),
 		ticketCmd(),
 	)
@@ -230,13 +275,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.player = msg.player
 		m.loading = true
-		return m, tea.Batch(loadingRadioCmd(m.ctx, m.player), listenLogsCmd(m.player))
+		return m, tea.Batch(loadingRadioCmd(m.ctx, m.player, false), listenLogsCmd(m.player))
 
 	case logLineMsg:
-		m.logLines = append(m.logLines, string(msg))
-		if len(m.logLines) > maxLogLines {
-			m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
-		}
+		m.appendLog(string(msg))
 		return m, listenLogsCmd(m.player)
 
 	case playerLoadedMsg:
@@ -261,8 +303,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !errors.Is(msg.err, mpvplayer.ErrPlaybackInterrupted) {
 			return m, nil
 		}
-		m.loading = true
-		return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+		return m, newTempPlayerCmd(m.ctx, m.videos[m.vidIndex].URL)
+
+	// a temp player has been created, now wait for temp player to finish loading
+	case tempPlayerCreatedMsg:
+		if msg.err != nil {
+			m.appendLog(fmt.Sprintf("reconnect: failed to start replacement player: %v", msg.err))
+			return m, nil
+		}
+		m.tempPlayer = msg.tempPlayer
+		return m, loadingRadioCmd(m.ctx, m.tempPlayer, true)
+
+	// TODO: If temp player is loading while the user goes to a new station
+	// the new station will be switched back because of the intermediate temp player logic
+	// This should be fixed.
+	case tempPlayerLoadedMsg:
+		if msg.err != nil {
+			m.appendLog(fmt.Sprintf("reconnect: replacement player failed to load: %v", msg.err))
+			failedPlayer := m.tempPlayer
+			m.tempPlayer = nil
+			return m, quitStalePlayerCmd(failedPlayer)
+		}
+		//swap out old player
+		oldPlayer := m.player
+		m.player = m.tempPlayer
+
+		//remove reference in temp player
+		m.tempPlayer = nil
+
+		return m, tea.Batch(quitStalePlayerCmd(oldPlayer), listenLogsCmd(m.player), playerReconnectCmd(m.ctx, m.player))
 
 	case tea.KeyPressMsg:
 
@@ -282,17 +351,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selected > 0 {
 				m.selected--
 			}
-
-		// case "down":
-		// 	if m.selected != 4 {
-		// 		m.prevSelected = m.selected
-		// 		m.selected = 4
-		// 	}
-
-		// case "up":
-		// 	if m.selected == 4 {
-		// 		m.selected = m.prevSelected
-		// 	}
 
 		// select option
 		case "enter":
@@ -325,9 +383,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
 
-				// case 4:
-				// 	// graceful shutdown of the player and bubbletea
-				// 	return m, tea.Sequence(quitPlayerCmd(m.player), tea.ClearScreen, tea.Quit)
 			}
 
 		}
@@ -337,13 +392,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 
+	db := true
+
 	if m.clear {
 		return tea.NewView("")
 	}
-	// player header
-	// header := "\n--------Lofi Radio--------\n\n"
-
-	// header := m.styles.text.Render(headerArt)
 
 	//main display section
 	var display string
@@ -387,22 +440,21 @@ func (m model) View() tea.View {
 		buttons = append(buttons, style.Render(fmt.Sprintf("%s", choice)))
 	}
 
-	// style := m.styles.buttonUnselected
-	// if m.selected == 4 {
-	// 	style = m.styles.selected
-	// }
-
 	//footer
 	options := lipgloss.NewStyle().Width(m.styles.frame.GetWidth()).Align(lipgloss.Center).Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
 
 	text := display + options
 
-	result := m.styles.frame.Render(text)
+	radioDisplay := m.styles.frame.Render(text)
 
 	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
 
+	if db {
+		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
+	}
+
 	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(lipgloss.JoinHorizontal(lipgloss.Top, result, logs))
+	return tea.NewView(radioDisplay)
 
 }
 
