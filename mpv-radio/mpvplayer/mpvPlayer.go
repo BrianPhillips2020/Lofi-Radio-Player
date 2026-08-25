@@ -48,7 +48,8 @@ func NewPlayer(ctx context.Context, url string, id int) (*MpvPlayer, error) {
 	// sets the path for communicating with mpv
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("mpvsocket-%d-%d.sock", os.Getpid(), id))
 
-	cmd := exec.CommandContext(ctx, "mpv", "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
+	// set ytdl-raw-options="no-check-certificate=" if needed
+	cmd := exec.CommandContext(ctx, "mpv", "--config-dir=<mpv_home dir>", "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 
 	// Must be set before cmd is started
 	out, err := cmd.StdoutPipe()
@@ -272,7 +273,7 @@ type PlaylistVideo struct {
 func GetVideosFromPlaylist(url string) ([]PlaylistVideo, error) {
 
 	// yt-dlp -j prints one JSON object per line, one per playlist entry
-	cmd := exec.Command("yt-dlp", "--flat-playlist", "-j", url)
+	cmd := exec.Command("yt-dlp", "--flat-playlist", "--no-check-certificate", "-j", url)
 
 	result, err := cmd.Output()
 	if err != nil {

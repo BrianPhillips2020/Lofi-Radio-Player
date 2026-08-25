@@ -8,6 +8,7 @@ import (
 	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,7 @@ type model struct {
 	paused       bool                      //paused or playing?
 	clear        bool
 	spinner      spinner.Model
+	db           bool
 	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
 }
 
@@ -80,7 +82,7 @@ func newStyles() (s *styles) {
 	return s
 }
 
-func initialModel(ctx context.Context, playlist string) model {
+func initialModel(ctx context.Context, playlist string, arg string) model {
 
 	videos, err := mpvplayer.GetVideosFromPlaylist(playlist)
 
@@ -99,6 +101,8 @@ func initialModel(ctx context.Context, playlist string) model {
 		fmt.Printf("Initialization error: %v", err)
 	}
 
+	db, _ := strconv.ParseBool(arg)
+
 	return model{
 		styles:   newStyles(),
 		player:   player,
@@ -110,6 +114,7 @@ func initialModel(ctx context.Context, playlist string) model {
 		loading:  true,
 		clear:    false,
 		spinner:  spinner.New(spinner.WithSpinner(spinner.Dot)),
+		db:       db,
 	}
 
 }
@@ -392,8 +397,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 
-	db := true
-
 	if m.clear {
 		return tea.NewView("")
 	}
@@ -449,7 +452,7 @@ func (m model) View() tea.View {
 
 	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
 
-	if db {
+	if m.db {
 		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
 	}
 
@@ -465,7 +468,9 @@ func main() {
 
 	playlistUrl := "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"
 
-	p := tea.NewProgram(initialModel(ctx, playlistUrl))
+	db := os.Args[1]
+
+	p := tea.NewProgram(initialModel(ctx, playlistUrl, db))
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("ha you suck: %v", err)
