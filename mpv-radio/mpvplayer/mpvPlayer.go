@@ -48,8 +48,11 @@ func NewPlayer(ctx context.Context, url string, id int) (*MpvPlayer, error) {
 	// sets the path for communicating with mpv
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("mpvsocket-%d-%d.sock", os.Getpid(), id))
 
-	// set ytdl-raw-options="no-check-certificate=" if needed
-	cmd := exec.CommandContext(ctx, "mpv", "--config-dir=<mpv_home dir>", "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
+	//FOR CUSTOM MPV CONFIG set `MPV_HOME` variable on your machine
+	//ytdl-raw-options="no-check-certificate=" to bypass cert checking
+	mpvConfig := os.Getenv("MPV_HOME")
+
+	cmd := exec.CommandContext(ctx, "mpv", fmt.Sprintf("--config-dir=%s", mpvConfig), "--no-video", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 
 	// Must be set before cmd is started
 	out, err := cmd.StdoutPipe()
@@ -324,7 +327,7 @@ func (player *MpvPlayer) WatchForInterrupt(ctx context.Context) error {
 		default:
 		}
 
-		if strings.Contains(text, "HTTP error 403") {
+		if strings.Contains(text, "HTTP error 403") || strings.Contains(text, "underrun detected") {
 			return ErrPlaybackInterrupted
 		}
 	}

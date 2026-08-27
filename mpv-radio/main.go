@@ -82,7 +82,7 @@ func newStyles() (s *styles) {
 	return s
 }
 
-func initialModel(ctx context.Context, playlist string, arg string) model {
+func initialModel(ctx context.Context, playlist string, arg bool) model {
 
 	videos, err := mpvplayer.GetVideosFromPlaylist(playlist)
 
@@ -101,8 +101,6 @@ func initialModel(ctx context.Context, playlist string, arg string) model {
 		fmt.Printf("Initialization error: %v", err)
 	}
 
-	db, _ := strconv.ParseBool(arg)
-
 	return model{
 		styles:   newStyles(),
 		player:   player,
@@ -114,7 +112,7 @@ func initialModel(ctx context.Context, playlist string, arg string) model {
 		loading:  true,
 		clear:    false,
 		spinner:  spinner.New(spinner.WithSpinner(spinner.Dot)),
-		db:       db,
+		db:       arg,
 	}
 
 }
@@ -468,7 +466,16 @@ func main() {
 
 	playlistUrl := "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"
 
-	db := os.Args[1]
+	// Take in arguments. If no arguments passed in or error, assume false
+	db := false
+	var err error
+	//note for brian -> checking for >1 because the program name is also in os.Args
+	if len(os.Args) > 1 {
+		db, err = strconv.ParseBool(os.Args[1])
+		if err != nil {
+			db = false
+		}
+	}
 
 	p := tea.NewProgram(initialModel(ctx, playlistUrl, db))
 
