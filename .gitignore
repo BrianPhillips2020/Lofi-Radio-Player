@@ -36,3 +36,6 @@ Thumbs.db
 
 # Claude local settings
 .claude/settings.local.json
+
+#ignore script file
+/lofi-radio
