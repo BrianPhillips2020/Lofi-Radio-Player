@@ -43,6 +43,8 @@ type model struct {
 	spinner      spinner.Model
 	db           bool
 	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
+	volume       int
+	muted        bool
 }
 
 type styles struct {
@@ -71,13 +73,13 @@ func newStyles() (s *styles) {
 	s = new(styles)
 	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
 	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	s.frame = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
+	s.frame = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
 	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
-	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(-1).Align(lipgloss.Center)
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(9).Height(1).Align(lipgloss.Center)
+	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(6).Align(lipgloss.Center)
+	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(6).Align(lipgloss.Center)
 	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
 	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
-	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder())
+	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder()).Height(1).Width(30)
 	s.logs = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(s.frame.GetHeight())
 	return s
 }
@@ -107,12 +109,14 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		videos:   videos,
 		ctx:      ctx,
 		vidIndex: 0,
-		choices:  []string{"<<", "pause", "reload", ">>"},
+		choices:  []string{"<<", "pause", " ↺", ">>"},
 		paused:   false,
 		loading:  true,
 		clear:    false,
 		spinner:  spinner.New(spinner.WithSpinner(spinner.Dot)),
 		db:       arg,
+		volume:   50,
+		muted:    false,
 	}
 
 }
@@ -289,6 +293,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = false
+		m.player.SetVolume(m.volume)
+		if m.muted {
+			m.player.SetMute(true)
+		}
 		return m, playerReconnectCmd(m.ctx, m.player)
 
 	case quitMsg:
@@ -355,6 +363,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected--
 			}
 
+		case "up":
+			if m.volume < 100 {
+				if m.muted {
+					_, _ = m.player.SetMute(false)
+					m.muted = false
+				}
+				m.volume += 10
+				m.player.VolumeUp()
+			}
+
+		case "down":
+			if m.volume > 0 {
+				if m.muted {
+					_, _ = m.player.SetMute(false)
+					m.muted = false
+				}
+				m.volume -= 10
+				m.player.VolumeDown()
+			}
+
+		case "m":
+			if muted, err := m.player.ToggleMute(); err == nil {
+				m.muted = muted
+			}
+
 		// select option
 		case "enter":
 			switch m.selected {
@@ -415,7 +448,7 @@ func (m model) View() tea.View {
 		}
 	}
 
-	display = "\n" + displayStyle.Render(display) + "\n"
+	display = displayStyle.Render(display)
 
 	buttons := make([]string, 0, len(m.choices))
 	for i, choice := range m.choices {
@@ -428,13 +461,13 @@ func (m model) View() tea.View {
 
 		if i == 1 {
 			if !m.paused {
-				choice = "pause"
+				choice = "⏸"
 			} else {
 				blink := time.Now().UnixMilli()/500%2 == 0
 				if blink {
-					choice = "play"
+					choice = "▶"
 				} else {
-					choice = "    "
+					choice = " "
 				}
 			}
 		}
@@ -444,7 +477,12 @@ func (m model) View() tea.View {
 	//footer
 	options := lipgloss.NewStyle().Width(m.styles.frame.GetWidth()).Align(lipgloss.Center).Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
 
-	text := display + options
+	var text string
+	if !m.loading {
+		text = lipgloss.JoinVertical(0.4, display, options)
+	} else {
+		text = display
+	}
 
 	radioDisplay := m.styles.frame.Render(text)
 

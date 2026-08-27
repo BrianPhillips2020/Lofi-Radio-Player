@@ -38,6 +38,10 @@ type MpvPlayer struct {
 	// streams each line of cmdOut as it's read by WatchForInterrupt, so
 	// callers can display the raw player output live
 	logs chan string
+
+	// whether mpv's mute property is currently set; tracked here so
+	// ToggleMute doesn't need the caller to remember prior state
+	muted bool
 }
 
 // Return a new Player. ctx controls the mpv process's lifetime: canceling
@@ -223,8 +227,42 @@ func (p *MpvPlayer) Pause() (string, error) {
 func (p *MpvPlayer) Resume() (string, error)      { return p.sendCommand("set-property", "pause", false) }
 func (p *MpvPlayer) TogglePause() (string, error) { return p.sendCommand("cycle", "pause") }
 
-func (p *MpvPlayer) VolumeUp() (string, error)   { return p.sendCommand("add", "volume", 5) }
-func (p *MpvPlayer) VolumeDown() (string, error) { return p.sendCommand("add", "volume", -5) }
+func (p *MpvPlayer) VolumeUp() (string, error)   { return p.sendCommand("add", "volume", 10) }
+func (p *MpvPlayer) VolumeDown() (string, error) { return p.sendCommand("add", "volume", -10) }
+
+func (p *MpvPlayer) SetVolume(volume int) (string, error) {
+	return p.sendCommand("set-property", "volume", volume)
+}
+
+// SetMute sets mpv's native mute property, which mutes/unmutes without
+// touching the underlying volume level, and records the resulting state.
+func (p *MpvPlayer) SetMute(muted bool) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, err := p.sendCommand("set_property", "mute", muted); err != nil {
+		return p.muted, err
+	}
+
+	p.muted = muted
+	return p.muted, nil
+}
+
+// ToggleMute flips the current mute state and returns the resulting state.
+func (p *MpvPlayer) ToggleMute() (bool, error) {
+	p.mu.Lock()
+	current := p.muted
+	p.mu.Unlock()
+
+	return p.SetMute(!current)
+}
+
+// Muted reports whether mute is currently set.
+func (p *MpvPlayer) Muted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.muted
+}
 
 func (p *MpvPlayer) Quit() (string, error) { return p.sendCommand("quit") }
 
