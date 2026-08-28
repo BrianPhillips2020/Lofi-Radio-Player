@@ -429,6 +429,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+var eighths = []rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+
+// height = number of terminal rows the bar occupies
+// pct = 0.0 to 1.0
+func renderVerticalBar(height int, pct float64) []string {
+	totalEighths := int(pct*float64(height)*8 + 0.5) // rounded
+
+	fullRows := totalEighths / 8
+	remainder := totalEighths % 8
+
+	rows := make([]string, height)
+	for i := 0; i < height; i++ {
+		rowFromBottom := height - 1 - i
+		switch {
+		case rowFromBottom < fullRows:
+			rows[i] = string(eighths[8]) // full block
+		case rowFromBottom == fullRows && remainder > 0:
+			rows[i] = string(eighths[remainder]) // partial block
+		default:
+			rows[i] = " " // empty
+		}
+	}
+	return rows
+}
+
 func (m model) View() tea.View {
 
 	if m.clear {
