@@ -14,6 +14,7 @@ import (
 	"time"
 
 	//bubbletea deps
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -45,6 +46,7 @@ type model struct {
 	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
 	volume       int
 	muted        bool
+	volumeBar    progress.Model
 }
 
 type styles struct {
@@ -73,10 +75,10 @@ func newStyles() (s *styles) {
 	s = new(styles)
 	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
 	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	s.frame = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
+	s.frame = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
 	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
-	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(6).Align(lipgloss.Center)
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.BrightBlue).Width(6).Align(lipgloss.Center)
+	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Width(6).Align(lipgloss.Center)
+	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Width(6).Align(lipgloss.Center)
 	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
 	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
 	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder()).Height(1).Width(30)
@@ -104,19 +106,20 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 	}
 
 	return model{
-		styles:   newStyles(),
-		player:   player,
-		videos:   videos,
-		ctx:      ctx,
-		vidIndex: 0,
-		choices:  []string{"<<", "pause", " ↺", ">>"},
-		paused:   false,
-		loading:  true,
-		clear:    false,
-		spinner:  spinner.New(spinner.WithSpinner(spinner.Dot)),
-		db:       arg,
-		volume:   50,
-		muted:    false,
+		styles:    newStyles(),
+		player:    player,
+		videos:    videos,
+		ctx:       ctx,
+		vidIndex:  0,
+		choices:   []string{"<<", "pause", " ↺", ">>"},
+		paused:    false,
+		loading:   true,
+		clear:     false,
+		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot)),
+		db:        arg,
+		volume:    50,
+		muted:     false,
+		volumeBar: progress.New(progress.WithScaled(true)),
 	}
 
 }
@@ -479,7 +482,7 @@ func (m model) View() tea.View {
 
 	var text string
 	if !m.loading {
-		text = lipgloss.JoinVertical(0.4, display, options)
+		text = lipgloss.JoinVertical(.5, display, options)
 	} else {
 		text = display
 	}
@@ -487,6 +490,10 @@ func (m model) View() tea.View {
 	radioDisplay := m.styles.frame.Render(text)
 
 	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
+
+	volumeProgress := m.volumeBar.ViewAs((float64(m.volume) / float64(100)))
+
+	radioDisplay = lipgloss.JoinVertical(1, radioDisplay, volumeProgress)
 
 	if m.db {
 		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
