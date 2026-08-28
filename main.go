@@ -63,6 +63,9 @@ type model struct {
 	muted        bool
 	volumeBar    progress.Model
 	help         bool
+	frameCount   int
+	frameRate    int
+	cache        string
 }
 
 type styles struct {
@@ -193,21 +196,22 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 	}
 
 	return model{
-		styles:    newStyles(),
-		player:    player,
-		videos:    videos,
-		ctx:       ctx,
-		vidIndex:  0,
-		choices:   []string{"⏮", "⏸", "⏭"},
-		paused:    false,
-		loading:   true,
-		clear:     false,
-		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot)),
-		db:        arg,
-		volume:    50,
-		muted:     false,
-		volumeBar: progress.New(progress.WithScaled(true)),
-		help:      false,
+		styles:     newStyles(),
+		player:     player,
+		videos:     videos,
+		ctx:        ctx,
+		vidIndex:   0,
+		choices:    []string{"⏮", "⏸", "⏭"},
+		paused:     false,
+		loading:    true,
+		clear:      false,
+		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot)),
+		db:         arg,
+		volume:     50,
+		muted:      false,
+		volumeBar:  progress.New(progress.WithScaled(true)),
+		help:       false,
+		frameCount: 0,
 	}
 
 }
@@ -233,6 +237,9 @@ type tickMsg time.Time
 // shimmerMsg drives the periodic re-coloring of the synthwave art's
 // foreground so it pulses between white and neon blue.
 type shimmerMsg time.Time
+
+// tracks 1 second ticks to determine framerate
+type frameRateMsg time.Time
 
 type quitMsg struct {
 	err error
@@ -263,6 +270,12 @@ func ticketCmd() tea.Cmd {
 	})
 }
 
+func frameRateCmd() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return frameRateMsg(t)
+	})
+}
+
 // shimmerInterval controls how often the shimmer sweep is recomputed;
 // shimmerSweepTime is how long the highlight band takes to cross the art;
 // shimmerWaitTime is the pause before the next sweep starts;
@@ -270,7 +283,7 @@ func ticketCmd() tea.Cmd {
 const (
 	shimmerInterval  = 80 * time.Millisecond
 	shimmerSweepTime = 1250 * time.Millisecond
-	shimmerWaitTime  = 2 * time.Second
+	shimmerWaitTime  = 4 * time.Second
 	shimmerBandWidth = 10
 )
 
@@ -416,6 +429,7 @@ func listenLogsCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
+		frameRateCmd(),
 		m.spinner.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player, false),
@@ -426,7 +440,13 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.frameCount++
 	switch msg := msg.(type) {
+
+	case frameRateMsg:
+		m.frameRate = m.frameCount
+		m.frameCount = 0
+		return m, frameRateCmd()
 
 	case tickMsg:
 		return m, ticketCmd()
@@ -452,7 +472,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(loadingRadioCmd(m.ctx, m.player, false), listenLogsCmd(m.player))
 
 	case logLineMsg:
-		m.appendLog(string(msg))
+		log := string(msg)
+		m.appendLog(log)
+
+		if strings.Contains(log, "Cache") {
+			// Find the byte index of the target substring
+			if start := strings.Index(log, "Cache"); start != -1 {
+				// Slice from the found index to the very end
+				m.cache = log[start+len("Cache: "):]
+			}
+		}
 		return m, listenLogsCmd(m.player)
 
 	case playerLoadedMsg:
@@ -673,8 +702,10 @@ func (m model) View() tea.View {
 		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
 	}
 
+	head := lipgloss.JoinHorizontal(lipgloss.Right, clock, m.styles.clock.Render(fmt.Sprintf(" || cache: %s || %dfps", m.cache, m.frameRate)))
+
 	// clock pinned to the top-left corner, above the untouched layout below
-	radioDisplay = lipgloss.JoinVertical(lipgloss.Left, clock, radioDisplay)
+	radioDisplay = lipgloss.JoinVertical(lipgloss.Left, head, radioDisplay)
 
 	v := tea.NewView(radioDisplay)
 
