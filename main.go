@@ -5,7 +5,9 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"image/color"
 	"lofi-radio/mpvplayer"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -25,8 +27,21 @@ const maxLogLines = 4
 
 var nextPlayerId atomic.Int64
 
-// //go:embed ascii/lofi-hiphop.txt
-// var headerArt string
+//go:embed lofi.txt
+var lofiArtRaw string
+
+//go:embed synthwave2.txt
+var synthwaveRaw string
+
+// loadASCIIArt returns the embedded lofi.txt ascii art, trimmed of any
+// trailing newline left over from the source file.
+func loadASCIIArt() string {
+	return strings.TrimRight(lofiArtRaw, "\n")
+}
+
+func loadSynthWave() string {
+	return strings.TrimRight(synthwaveRaw, "\n")
+}
 
 type model struct {
 	styles       *styles
@@ -47,6 +62,7 @@ type model struct {
 	volume       int
 	muted        bool
 	volumeBar    progress.Model
+	help         bool
 }
 
 type styles struct {
@@ -57,9 +73,16 @@ type styles struct {
 	buttonUnselected,
 	spinStyle,
 	frame,
+	outer,
 	logs,
-	text lipgloss.Style
-	// buttons lipgloss.Style
+	text,
+	title,
+	nowPlayingLabel,
+	songTitle,
+	art,
+	hint,
+	volumeLabel,
+	clock lipgloss.Style
 }
 
 // appendLog records a line for the on-screen log pane, keeping only the
@@ -71,18 +94,82 @@ func (m *model) appendLog(line string) {
 	}
 }
 
+var (
+	accentColor = lipgloss.Color("#B084FF")
+	dimColor    = lipgloss.Color("#6C6C7A")
+	textColor   = lipgloss.Color("#F4F1FF")
+)
+
+const cardWidth = 38
+
 func newStyles() (s *styles) {
 	s = new(styles)
-	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
 	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	s.frame = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
+
+	s.frame = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3)
+
+	s.outer = lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(accentColor).
+		Padding(1)
+
+	s.title = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(accentColor).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
 	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
-	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Width(6).Align(lipgloss.Center)
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Width(6).Align(lipgloss.Center)
-	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
-	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
-	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder()).Height(1).Width(30)
-	s.logs = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(s.frame.GetHeight())
+
+	s.nowPlayingLabel = lipgloss.NewStyle().
+		Foreground(dimColor).
+		Bold(true).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
+	s.songTitle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(textColor).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
+	s.art = lipgloss.NewStyle().
+		Foreground(lipgloss.White).
+		Align(lipgloss.Center)
+
+	s.buttonUnselected = lipgloss.NewStyle().
+		Foreground(textColor).
+		Padding(0, 2)
+
+	s.selected = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1A1620")).
+		Background(accentColor).
+		Bold(true).
+		Padding(0, 2)
+
+	s.loading = lipgloss.NewStyle().Width(cardWidth).Align(lipgloss.Center)
+	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(cardWidth)
+	s.display = s.loading
+
+	s.volumeLabel = lipgloss.NewStyle().Foreground(dimColor)
+
+	s.clock = lipgloss.NewStyle().Foreground(dimColor)
+
+	s.hint = lipgloss.NewStyle().
+		Foreground(dimColor).
+		Italic(true).
+		Width(cardWidth + 8). // matches frame content + padding + border
+		Align(lipgloss.Center)
+
+	s.logs = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dimColor).
+		Padding(0, 1).
+		Width(45)
+
 	return s
 }
 
@@ -111,7 +198,7 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		videos:    videos,
 		ctx:       ctx,
 		vidIndex:  0,
-		choices:   []string{"<<", "pause", " ↺", ">>"},
+		choices:   []string{"⏮", "⏸", "⏭"},
 		paused:    false,
 		loading:   true,
 		clear:     false,
@@ -120,6 +207,7 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		volume:    50,
 		muted:     false,
 		volumeBar: progress.New(progress.WithScaled(true)),
+		help:      false,
 	}
 
 }
@@ -141,6 +229,10 @@ type playerLoadedMsg struct {
 }
 
 type tickMsg time.Time
+
+// shimmerMsg drives the periodic re-coloring of the synthwave art's
+// foreground so it pulses between white and neon blue.
+type shimmerMsg time.Time
 
 type quitMsg struct {
 	err error
@@ -169,6 +261,74 @@ func ticketCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// shimmerInterval controls how often the shimmer sweep is recomputed;
+// shimmerSweepTime is how long the highlight band takes to cross the art;
+// shimmerWaitTime is the pause before the next sweep starts;
+// shimmerBandWidth is how many columns wide the band is, in characters.
+const (
+	shimmerInterval  = 80 * time.Millisecond
+	shimmerSweepTime = 1250 * time.Millisecond
+	shimmerWaitTime  = 2 * time.Second
+	shimmerBandWidth = 10
+)
+
+func shimmerCmd() tea.Cmd {
+	return tea.Tick(shimmerInterval, func(t time.Time) tea.Msg {
+		return shimmerMsg(t)
+	})
+}
+
+// shimmerSweepColor returns the color for the character at col out of width
+// total columns, at time t: neon blue inside a band that sweeps left to
+// right once per cycle, then pauses white for shimmerWaitTime before the
+// next sweep.
+func shimmerSweepColor(col, width int, t time.Time) color.Color {
+	white := [3]float64{255, 255, 255}
+	neonBlue := [3]float64{5, 130, 180}
+
+	seconds := float64(t.UnixNano()) / float64(time.Second)
+	cycle := shimmerSweepTime.Seconds() + shimmerWaitTime.Seconds()
+	phase := math.Mod(seconds, cycle)
+
+	if phase >= shimmerSweepTime.Seconds() {
+		return lipgloss.Color("#FFFFFF")
+	}
+
+	sweepPos := (phase / shimmerSweepTime.Seconds()) * float64(width)
+	dist := math.Abs(float64(col) - sweepPos)
+	blend := math.Max(0, 1-dist/shimmerBandWidth)
+
+	r := int(white[0] + blend*(neonBlue[0]-white[0]))
+	g := int(white[1] + blend*(neonBlue[1]-white[1]))
+	b := int(white[2] + blend*(neonBlue[2]-white[2]))
+
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
+}
+
+// renderShimmerSweep renders art with style applied per character, colored
+// by shimmerSweepColor so a highlight band sweeps left to right across it.
+func renderShimmerSweep(style lipgloss.Style, art string, t time.Time) string {
+	lines := strings.Split(art, "\n")
+
+	width := 0
+	for _, line := range lines {
+		if len(line) > width {
+			width = len(line)
+		}
+	}
+
+	var out strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			out.WriteByte('\n')
+		}
+		for col, r := range line {
+			out.WriteString(style.Foreground(shimmerSweepColor(col, width, t)).Render(string(r)))
+		}
+	}
+	return out.String()
 }
 
 func loadPlaylistCmd(ctx context.Context, url string) tea.Cmd {
@@ -261,6 +421,7 @@ func (m model) Init() tea.Cmd {
 		loadingRadioCmd(m.ctx, m.player, false),
 		listenLogsCmd(m.player),
 		ticketCmd(),
+		shimmerCmd(),
 	)
 }
 
@@ -269,6 +430,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, ticketCmd()
+
+	case shimmerMsg:
+		return m, shimmerCmd()
 
 	case playlistLoaderMsg:
 		if msg.err != nil {
@@ -377,19 +541,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down":
-			if m.volume > 0 {
+			if m.volume >= 10 {
 				if m.muted {
 					_, _ = m.player.SetMute(false)
 					m.muted = false
 				}
 				m.volume -= 10
 				m.player.VolumeDown()
+				if m.volume == 0 {
+					_, _ = m.player.SetMute(true)
+					m.muted = true
+				}
 			}
 
 		case "m":
 			if muted, err := m.player.ToggleMute(); err == nil {
 				m.muted = muted
 			}
+
+		case "r":
+			m.loading = true
+			return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+
+		case "h":
+			m.help = !m.help
 
 		// select option
 		case "enter":
@@ -408,13 +583,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.paused = !m.paused
 				return m, togglePlayCmd(m.player)
 
-			// select reload player
-			case 2:
-				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
-
 			// select next song
-			case 3:
+			case 2:
 				m.vidIndex++
 				if m.vidIndex == len(m.videos) {
 					m.vidIndex = 0
@@ -435,28 +605,27 @@ func (m model) View() tea.View {
 		return tea.NewView("")
 	}
 
-	//main display section
-	var display string
-	var displayStyle lipgloss.Style
-	if m.loading {
-		display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
-		displayStyle = m.styles.loading
+	title := m.styles.title.Render("L O F I   R A D I O")
+	clock := m.styles.clock.Render(time.Now().Format("3:04 PM"))
+
+	// now-playing section
+	var nowPlaying string
+	if m.loading || m.vidIndex >= len(m.videos) {
+		spin := fmt.Sprintf("%s tuning in…", m.styles.spinStyle.Render(m.spinner.View()))
+		nowPlaying = m.styles.loading.Render(spin)
 	} else {
-		if m.vidIndex < len(m.videos) {
-			display += m.styles.cutOffText.Render(m.videos[m.vidIndex].Title)
-			displayStyle = m.styles.display
-		} else {
-			display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
-			displayStyle = m.styles.loading
+		label := m.styles.nowPlayingLabel.Render("YOU ARE LISTENING TO")
+		art := m.styles.art.Render(loadASCIIArt())
+		if m.vidIndex == 1 {
+			art = renderShimmerSweep(m.styles.art, loadSynthWave(), time.Now())
 		}
+		nowPlaying = lipgloss.JoinVertical(lipgloss.Center, label, art)
 	}
 
-	display = displayStyle.Render(display)
-
+	// transport controls
 	buttons := make([]string, 0, len(m.choices))
 	for i, choice := range m.choices {
 
-		// determine button style
 		style := m.styles.buttonUnselected
 		if m.selected == i {
 			style = m.styles.selected
@@ -474,33 +643,44 @@ func (m model) View() tea.View {
 				}
 			}
 		}
-		buttons = append(buttons, style.Render(fmt.Sprintf("%s", choice)))
+		buttons = append(buttons, style.Render(choice))
 	}
+	controls := lipgloss.NewStyle().Width(cardWidth).Align(lipgloss.Center).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
 
-	//footer
-	options := lipgloss.NewStyle().Width(m.styles.frame.GetWidth()).Align(lipgloss.Center).Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
+	// volumeRow := m.volumeBar.ViewAs(float64(m.volume) / float64(100))
 
-	var text string
-	if !m.loading {
-		text = lipgloss.JoinVertical(.5, display, options)
+	var body string
+	if m.loading || m.vidIndex >= len(m.videos) {
+		body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying)
 	} else {
-		text = display
+		body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying, "", controls)
+		// body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying, "", controls, "", volumeRow)
 	}
 
-	radioDisplay := m.styles.frame.Render(text)
+	card := m.styles.frame.Render(body)
 
-	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
+	hint := m.styles.hint.Render("←/→ select · enter confirm · ↑/↓ vol · m mute · q quit")
 
-	volumeProgress := m.volumeBar.ViewAs((float64(m.volume) / float64(100)))
+	radioDisplay := card
 
-	radioDisplay = lipgloss.JoinVertical(1, radioDisplay, volumeProgress)
+	if m.help {
+		radioDisplay = lipgloss.JoinVertical(lipgloss.Center, card, hint)
+	}
 
 	if m.db {
+		logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
 		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
 	}
 
-	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(radioDisplay)
+	// clock pinned to the top-left corner, above the untouched layout below
+	radioDisplay = lipgloss.JoinVertical(lipgloss.Left, clock, radioDisplay)
+
+	v := tea.NewView(radioDisplay)
+
+	v.AltScreen = true
+
+	return v
 
 }
 
