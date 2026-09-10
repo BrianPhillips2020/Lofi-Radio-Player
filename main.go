@@ -8,6 +8,7 @@ import (
 	"lofi-radio/mpvplayer"
 	"os"
 	"os/signal"
+	"shimmer"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,8 +26,31 @@ const maxLogLines = 4
 
 var nextPlayerId atomic.Int64
 
-// //go:embed ascii/lofi-hiphop.txt
-// var headerArt string
+//go:embed lofi.txt
+var lofiArt string
+
+//go:embed synthwave2.txt
+var synthwaveArt string
+
+//go:embed block.txt
+var block string
+
+// loadASCIIArt maps a Lofi Girl radio video title to its matching ascii art.
+// Matches are done on lowercased, distinctive fragments of the title so the
+// emoji and "watching" counts don't matter. Falls back to lofiArt when the
+// title doesn't match any known station.
+func loadASCIIArt(title string) string {
+	t := strings.ToLower(title)
+
+	switch {
+	// synthwave radio 🌌 beats to chill/game to
+	case strings.Contains(t, "synthwave"):
+		return synthwaveArt
+
+	default:
+		return lofiArt
+	}
+}
 
 type model struct {
 	styles       *styles
@@ -42,11 +66,16 @@ type model struct {
 	paused       bool                      //paused or playing?
 	clear        bool
 	spinner      spinner.Model
+	shimmer      shimmer.Model
 	db           bool
 	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
 	volume       int
 	muted        bool
 	volumeBar    progress.Model
+	help         bool
+	frameCount   int
+	frameRate    int
+	cache        string
 }
 
 type styles struct {
@@ -57,9 +86,16 @@ type styles struct {
 	buttonUnselected,
 	spinStyle,
 	frame,
+	outer,
 	logs,
-	text lipgloss.Style
-	// buttons lipgloss.Style
+	text,
+	title,
+	nowPlayingLabel,
+	songTitle,
+	art,
+	hint,
+	volumeLabel,
+	clock lipgloss.Style
 }
 
 // appendLog records a line for the on-screen log pane, keeping only the
@@ -71,18 +107,82 @@ func (m *model) appendLog(line string) {
 	}
 }
 
+var (
+	accentColor = lipgloss.Color("#B084FF")
+	dimColor    = lipgloss.Color("#6C6C7A")
+	textColor   = lipgloss.Color("#F4F1FF")
+)
+
+const cardWidth = 38
+
 func newStyles() (s *styles) {
 	s = new(styles)
-	// s.text = lipgloss.NewStyle().Foreground(lipgloss.Color("#0288D1"))
 	s.text = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	s.frame = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(2)
+
+	s.frame = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3)
+
+	s.outer = lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(accentColor).
+		Padding(1)
+
+	s.title = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(accentColor).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
 	s.spinStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
-	s.buttonUnselected = lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Width(6).Align(lipgloss.Center)
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Width(6).Align(lipgloss.Center)
-	s.loading = lipgloss.NewStyle().Width(s.frame.GetWidth() - 2).Height(s.frame.GetHeight() + 2).Align(lipgloss.Center)
-	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(25)
-	s.display = lipgloss.NewStyle().Inherit(s.loading).Border(lipgloss.NormalBorder()).Height(1).Width(30)
-	s.logs = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#864EFF")).Width(45).Height(s.frame.GetHeight())
+
+	s.nowPlayingLabel = lipgloss.NewStyle().
+		Foreground(dimColor).
+		Bold(true).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
+	s.songTitle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(textColor).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
+	s.art = lipgloss.NewStyle().
+		Foreground(lipgloss.White).
+		Align(lipgloss.Center)
+
+	s.buttonUnselected = lipgloss.NewStyle().
+		Foreground(textColor).
+		Padding(0, 2)
+
+	s.selected = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1A1620")).
+		Background(accentColor).
+		Bold(true).
+		Padding(0, 2)
+
+	s.loading = lipgloss.NewStyle().Width(cardWidth).Align(lipgloss.Center)
+	s.cutOffText = lipgloss.NewStyle().Inline(true).MaxWidth(cardWidth)
+	s.display = s.loading
+
+	s.volumeLabel = lipgloss.NewStyle().Foreground(dimColor)
+
+	s.clock = lipgloss.NewStyle().Foreground(dimColor)
+
+	s.hint = lipgloss.NewStyle().
+		Foreground(dimColor).
+		Italic(true).
+		Width(cardWidth + 8). // matches frame content + padding + border
+		Align(lipgloss.Center)
+
+	s.logs = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dimColor).
+		Padding(0, 1).
+		Width(45)
+
 	return s
 }
 
@@ -106,22 +206,24 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 	}
 
 	return model{
-		styles:    newStyles(),
-		player:    player,
-		videos:    videos,
-		ctx:       ctx,
-		vidIndex:  0,
-		choices:   []string{"<<", "pause", " ↺", ">>"},
-		paused:    false,
-		loading:   true,
-		clear:     false,
-		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot)),
-		db:        arg,
-		volume:    50,
-		muted:     false,
-		volumeBar: progress.New(progress.WithScaled(true)),
+		styles:     newStyles(),
+		player:     player,
+		videos:     videos,
+		ctx:        ctx,
+		vidIndex:   0,
+		choices:    []string{"⏮", "⏸", "⏭"},
+		paused:     false,
+		loading:    true,
+		clear:      false,
+		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot)),
+		shimmer:    shimmer.New(shimmer.WithText(lofiArt), shimmer.WithShimmerRGB(5, 130, 180)),
+		db:         arg,
+		volume:     50,
+		muted:      false,
+		volumeBar:  progress.New(progress.WithScaled(true)),
+		help:       false,
+		frameCount: 0,
 	}
-
 }
 
 // Bubbletea Msg types
@@ -141,6 +243,9 @@ type playerLoadedMsg struct {
 }
 
 type tickMsg time.Time
+
+// tracks 1 second ticks to determine framerate
+type frameRateMsg time.Time
 
 type quitMsg struct {
 	err error
@@ -168,6 +273,12 @@ type logLineMsg string
 func ticketCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func frameRateCmd() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return frameRateMsg(t)
 	})
 }
 
@@ -256,7 +367,9 @@ func listenLogsCmd(player *mpvplayer.MpvPlayer) tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
+		frameRateCmd(),
 		m.spinner.Tick,
+		m.shimmer.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player, false),
 		listenLogsCmd(m.player),
@@ -265,10 +378,21 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.frameCount++
 	switch msg := msg.(type) {
+
+	case frameRateMsg:
+		m.frameRate = m.frameCount
+		m.frameCount = 0
+		return m, frameRateCmd()
 
 	case tickMsg:
 		return m, ticketCmd()
+
+	case shimmer.TickMsg:
+		var cmd tea.Cmd
+		m.shimmer, cmd = m.shimmer.Update(msg)
+		return m, cmd
 
 	case playlistLoaderMsg:
 		if msg.err != nil {
@@ -288,7 +412,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(loadingRadioCmd(m.ctx, m.player, false), listenLogsCmd(m.player))
 
 	case logLineMsg:
-		m.appendLog(string(msg))
+		log := string(msg)
+		m.appendLog(log)
+
+		if strings.Contains(log, "Cache") {
+			// Find the byte index of the target substring
+			if start := strings.Index(log, "Cache"); start != -1 {
+				// Slice from the found index to the very end
+				m.cache = log[start+len("Cache: "):]
+			}
+		}
 		return m, listenLogsCmd(m.player)
 
 	case playerLoadedMsg:
@@ -377,19 +510,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down":
-			if m.volume > 0 {
+			if m.volume >= 10 {
 				if m.muted {
 					_, _ = m.player.SetMute(false)
 					m.muted = false
 				}
 				m.volume -= 10
 				m.player.VolumeDown()
+				if m.volume == 0 {
+					_, _ = m.player.SetMute(true)
+					m.muted = true
+				}
 			}
 
 		case "m":
 			if muted, err := m.player.ToggleMute(); err == nil {
 				m.muted = muted
 			}
+
+		case "r":
+			m.loading = true
+			return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+
+		case "h":
+			m.help = !m.help
 
 		// select option
 		case "enter":
@@ -401,26 +545,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.vidIndex = len(m.videos) - 1
 				}
 				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+				m.setShimmer(loadASCIIArt(m.videos[m.vidIndex].Title))
+				return m, tea.Batch(newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL), m.shimmer.Tick)
 
 			// select toggle pause
 			case 1:
 				m.paused = !m.paused
 				return m, togglePlayCmd(m.player)
 
-			// select reload player
-			case 2:
-				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
-
 			// select next song
-			case 3:
+			case 2:
 				m.vidIndex++
 				if m.vidIndex == len(m.videos) {
 					m.vidIndex = 0
 				}
 				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+				m.setShimmer(loadASCIIArt(m.videos[m.vidIndex].Title))
+				return m, tea.Batch(newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL), m.shimmer.Tick)
 
 			}
 
@@ -429,34 +570,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) setShimmer(art string) {
+	m.setShimmerColors(art, 5, 130, 180)
+}
+
+func (m *model) setShimmerColors(art string, r, g, b uint8) {
+	m.shimmer = shimmer.New(shimmer.WithText(art), shimmer.WithShimmerRGB(r, g, b))
+}
+
 func (m model) View() tea.View {
 
 	if m.clear {
 		return tea.NewView("")
 	}
 
-	//main display section
-	var display string
-	var displayStyle lipgloss.Style
-	if m.loading {
-		display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
-		displayStyle = m.styles.loading
+	title := m.styles.title.Render("L O F I   R A D I O")
+	clock := m.styles.clock.Render(time.Now().Format("3:04 PM"))
+
+	// now-playing section
+	var nowPlaying string
+	if m.loading || m.vidIndex >= len(m.videos) {
+		spin := fmt.Sprintf("%s tuning in…", m.styles.spinStyle.Render(m.spinner.View()))
+		nowPlaying = m.styles.loading.Render(spin)
 	} else {
-		if m.vidIndex < len(m.videos) {
-			display += m.styles.cutOffText.Render(m.videos[m.vidIndex].Title)
-			displayStyle = m.styles.display
-		} else {
-			display = fmt.Sprintf("%s loading", m.styles.spinStyle.Render(m.spinner.View()))
-			displayStyle = m.styles.loading
-		}
+		label := m.styles.nowPlayingLabel.Render("YOU ARE LISTENING TO")
+		art := m.shimmer.View() //generate art shimmer block
+		nowPlaying = lipgloss.JoinVertical(lipgloss.Center, label, art)
 	}
 
-	display = displayStyle.Render(display)
-
+	// transport controls
 	buttons := make([]string, 0, len(m.choices))
 	for i, choice := range m.choices {
 
-		// determine button style
 		style := m.styles.buttonUnselected
 		if m.selected == i {
 			style = m.styles.selected
@@ -474,33 +619,46 @@ func (m model) View() tea.View {
 				}
 			}
 		}
-		buttons = append(buttons, style.Render(fmt.Sprintf("%s", choice)))
+		buttons = append(buttons, style.Render(choice))
 	}
+	controls := lipgloss.NewStyle().Width(cardWidth).Align(lipgloss.Center).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
 
-	//footer
-	options := lipgloss.NewStyle().Width(m.styles.frame.GetWidth()).Align(lipgloss.Center).Render(lipgloss.JoinHorizontal(lipgloss.Top, buttons...))
+	// volumeRow := m.volumeBar.ViewAs(float64(m.volume) / float64(100))
 
-	var text string
-	if !m.loading {
-		text = lipgloss.JoinVertical(.5, display, options)
+	var body string
+	if m.loading || m.vidIndex >= len(m.videos) {
+		body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying)
 	} else {
-		text = display
+		body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying, "", controls)
+		// body = lipgloss.JoinVertical(lipgloss.Center, title, "", nowPlaying, "", controls, "", volumeRow)
 	}
 
-	radioDisplay := m.styles.frame.Render(text)
+	card := m.styles.frame.Render(body)
 
-	logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
+	hint := m.styles.hint.Render("←/→ select · enter confirm · ↑/↓ vol · m mute · q quit")
 
-	volumeProgress := m.volumeBar.ViewAs((float64(m.volume) / float64(100)))
+	radioDisplay := card
 
-	radioDisplay = lipgloss.JoinVertical(1, radioDisplay, volumeProgress)
+	if m.help {
+		radioDisplay = lipgloss.JoinVertical(lipgloss.Center, card, hint)
+	}
 
 	if m.db {
+		logs := m.styles.logs.Render(strings.Join(m.logLines, "\n"))
 		radioDisplay = lipgloss.JoinHorizontal(lipgloss.Top, radioDisplay, logs)
 	}
 
-	//I suppose that means bubblettea understands the entire view as a string
-	return tea.NewView(radioDisplay)
+	head := lipgloss.JoinHorizontal(lipgloss.Right, clock, m.styles.clock.Render(fmt.Sprintf(" || cache: %s || %dfps", m.cache, m.frameRate)))
+
+	// clock pinned to the top-left corner, above the untouched layout below
+	radioDisplay = lipgloss.JoinVertical(lipgloss.Left, head, radioDisplay)
+
+	v := tea.NewView(radioDisplay)
+
+	v.AltScreen = true
+
+	return v
 
 }
 
