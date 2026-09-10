@@ -2,6 +2,15 @@ package shimmer
 
 /**
 	Applies an intermittent shimmer to any text.
+	Sweeps a band of color from left to right.
+
+	Runs in an absolute time model, calculating position of the band every `shimmerFrameInterval` as a ratio of
+	`elapsed` time to `shimmerDuration`.
+
+	Usage:
+		customShimmer := shimmer.New(shimmer.WithText(block), shimmer.WithShimmerRGB(5, 130, 180))
+
+	Designed with inspiration from "charm.land/bubbles/v2/spinner" and "https://github.com/charmbracelet/bubbletea/tree/main/examples/doom-fire"
 **/
 
 import (
@@ -61,7 +70,7 @@ func nextID() int {
 const (
 	defaultBaseColor            = lipgloss.Color("#F4F1FF")
 	defaultShimmerColor         = lipgloss.Color("#B084FF")
-	defaultShimmerFrameInterval = 60 * time.Millisecond   // ~12.5fps sweep
+	defaultShimmerFrameInterval = 60 * time.Millisecond
 	defaultShimmerDuration      = 1250 * time.Millisecond // time for the band to cross
 	defaultShimmerWaitTime      = 4 * time.Second         // rest between sweeps
 	defaultBandWidth            = 10                      // band half-width, in characters

@@ -217,7 +217,6 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		help:       false,
 		frameCount: 0,
 	}
-
 }
 
 // Bubbletea Msg types
@@ -275,17 +274,6 @@ func frameRateCmd() tea.Cmd {
 		return frameRateMsg(t)
 	})
 }
-
-// shimmerInterval controls how often the shimmer sweep is recomputed;
-// shimmerSweepTime is how long the highlight band takes to cross the art;
-// shimmerWaitTime is the pause before the next sweep starts;
-// shimmerBandWidth is how many columns wide the band is, in characters.
-const (
-	shimmerInterval  = 80 * time.Millisecond
-	shimmerSweepTime = 1250 * time.Millisecond
-	shimmerWaitTime  = 4 * time.Second
-	shimmerBandWidth = 10
-)
 
 func loadPlaylistCmd(ctx context.Context, url string) tea.Cmd {
 	return func() tea.Msg {
