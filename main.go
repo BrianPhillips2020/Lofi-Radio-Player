@@ -27,22 +27,29 @@ const maxLogLines = 4
 var nextPlayerId atomic.Int64
 
 //go:embed lofi.txt
-var lofiArtRaw string
+var lofiArt string
 
 //go:embed synthwave2.txt
-var synthwaveRaw string
+var synthwaveArt string
 
 //go:embed block.txt
 var block string
 
-// loadASCIIArt returns the embedded lofi.txt ascii art, trimmed of any
-// trailing newline left over from the source file.
-func loadASCIIArt() string {
-	return strings.TrimRight(lofiArtRaw, "\n")
-}
+// loadASCIIArt maps a Lofi Girl radio video title to its matching ascii art.
+// Matches are done on lowercased, distinctive fragments of the title so the
+// emoji and "watching" counts don't matter. Falls back to lofiArt when the
+// title doesn't match any known station.
+func loadASCIIArt(title string) string {
+	t := strings.ToLower(title)
 
-func loadSynthWave() string {
-	return strings.TrimRight(synthwaveRaw, "\n")
+	switch {
+	// synthwave radio 🌌 beats to chill/game to
+	case strings.Contains(t, "synthwave"):
+		return synthwaveArt
+
+	default:
+		return lofiArt
+	}
 }
 
 type model struct {
@@ -209,7 +216,7 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		loading:    true,
 		clear:      false,
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot)),
-		shimmer:    shimmer.New(shimmer.WithText(block), shimmer.WithShimmerRGB(5, 130, 180)),
+		shimmer:    shimmer.New(shimmer.WithText(lofiArt), shimmer.WithShimmerRGB(5, 130, 180)),
 		db:         arg,
 		volume:     50,
 		muted:      false,
@@ -538,7 +545,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.vidIndex = len(m.videos) - 1
 				}
 				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+				m.setShimmer(loadASCIIArt(m.videos[m.vidIndex].Title))
+				return m, tea.Batch(newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL), m.shimmer.Tick)
 
 			// select toggle pause
 			case 1:
@@ -552,13 +560,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.vidIndex = 0
 				}
 				m.loading = true
-				return m, newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL)
+				m.setShimmer(loadASCIIArt(m.videos[m.vidIndex].Title))
+				return m, tea.Batch(newPlayerCmd(m.ctx, m.player, m.videos[m.vidIndex].URL), m.shimmer.Tick)
 
 			}
 
 		}
 	}
 	return m, nil
+}
+
+func (m *model) setShimmer(art string) {
+	m.setShimmerColors(art, 5, 130, 180)
+}
+
+func (m *model) setShimmerColors(art string, r, g, b uint8) {
+	m.shimmer = shimmer.New(shimmer.WithText(art), shimmer.WithShimmerRGB(r, g, b))
 }
 
 func (m model) View() tea.View {
@@ -577,10 +594,7 @@ func (m model) View() tea.View {
 		nowPlaying = m.styles.loading.Render(spin)
 	} else {
 		label := m.styles.nowPlayingLabel.Render("YOU ARE LISTENING TO")
-		art := m.styles.art.Render(loadASCIIArt())
-		if m.vidIndex == 1 {
-			art = m.shimmer.View()
-		}
+		art := m.shimmer.View() //generate art shimmer block
 		nowPlaying = lipgloss.JoinVertical(lipgloss.Center, label, art)
 	}
 
