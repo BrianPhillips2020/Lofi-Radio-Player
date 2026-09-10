@@ -5,11 +5,10 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"image/color"
 	"lofi-radio/mpvplayer"
-	"math"
 	"os"
 	"os/signal"
+	"shimmer"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -32,6 +31,9 @@ var lofiArtRaw string
 
 //go:embed synthwave2.txt
 var synthwaveRaw string
+
+//go:embed block.txt
+var block string
 
 // loadASCIIArt returns the embedded lofi.txt ascii art, trimmed of any
 // trailing newline left over from the source file.
@@ -57,6 +59,7 @@ type model struct {
 	paused       bool                      //paused or playing?
 	clear        bool
 	spinner      spinner.Model
+	shimmer      shimmer.Model
 	db           bool
 	logLines     []string //most recent lines read from the player's stdout by WatchForInterrupt
 	volume       int
@@ -206,6 +209,7 @@ func initialModel(ctx context.Context, playlist string, arg bool) model {
 		loading:    true,
 		clear:      false,
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot)),
+		shimmer:    shimmer.New(shimmer.WithText(block), shimmer.WithShimmerRGB(5, 130, 180)),
 		db:         arg,
 		volume:     50,
 		muted:      false,
@@ -233,10 +237,6 @@ type playerLoadedMsg struct {
 }
 
 type tickMsg time.Time
-
-// shimmerMsg drives the periodic re-coloring of the synthwave art's
-// foreground so it pulses between white and neon blue.
-type shimmerMsg time.Time
 
 // tracks 1 second ticks to determine framerate
 type frameRateMsg time.Time
@@ -286,63 +286,6 @@ const (
 	shimmerWaitTime  = 4 * time.Second
 	shimmerBandWidth = 10
 )
-
-func shimmerCmd() tea.Cmd {
-	return tea.Tick(shimmerInterval, func(t time.Time) tea.Msg {
-		return shimmerMsg(t)
-	})
-}
-
-// shimmerSweepColor returns the color for the character at col out of width
-// total columns, at time t: neon blue inside a band that sweeps left to
-// right once per cycle, then pauses white for shimmerWaitTime before the
-// next sweep.
-func shimmerSweepColor(col, width int, t time.Time) color.Color {
-	white := [3]float64{255, 255, 255}
-	neonBlue := [3]float64{5, 130, 180}
-
-	seconds := float64(t.UnixNano()) / float64(time.Second)
-	cycle := shimmerSweepTime.Seconds() + shimmerWaitTime.Seconds()
-	phase := math.Mod(seconds, cycle)
-
-	if phase >= shimmerSweepTime.Seconds() {
-		return lipgloss.Color("#FFFFFF")
-	}
-
-	sweepPos := (phase / shimmerSweepTime.Seconds()) * float64(width)
-	dist := math.Abs(float64(col) - sweepPos)
-	blend := math.Max(0, 1-dist/shimmerBandWidth)
-
-	r := int(white[0] + blend*(neonBlue[0]-white[0]))
-	g := int(white[1] + blend*(neonBlue[1]-white[1]))
-	b := int(white[2] + blend*(neonBlue[2]-white[2]))
-
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
-}
-
-// renderShimmerSweep renders art with style applied per character, colored
-// by shimmerSweepColor so a highlight band sweeps left to right across it.
-func renderShimmerSweep(style lipgloss.Style, art string, t time.Time) string {
-	lines := strings.Split(art, "\n")
-
-	width := 0
-	for _, line := range lines {
-		if len(line) > width {
-			width = len(line)
-		}
-	}
-
-	var out strings.Builder
-	for i, line := range lines {
-		if i > 0 {
-			out.WriteByte('\n')
-		}
-		for col, r := range line {
-			out.WriteString(style.Foreground(shimmerSweepColor(col, width, t)).Render(string(r)))
-		}
-	}
-	return out.String()
-}
 
 func loadPlaylistCmd(ctx context.Context, url string) tea.Cmd {
 	return func() tea.Msg {
@@ -431,11 +374,11 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		frameRateCmd(),
 		m.spinner.Tick,
+		m.shimmer.Tick,
 		loadPlaylistCmd(m.ctx, "https://www.youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L"),
 		loadingRadioCmd(m.ctx, m.player, false),
 		listenLogsCmd(m.player),
 		ticketCmd(),
-		shimmerCmd(),
 	)
 }
 
@@ -451,8 +394,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, ticketCmd()
 
-	case shimmerMsg:
-		return m, shimmerCmd()
+	case shimmer.TickMsg:
+		var cmd tea.Cmd
+		m.shimmer, cmd = m.shimmer.Update(msg)
+		return m, cmd
 
 	case playlistLoaderMsg:
 		if msg.err != nil {
@@ -646,7 +591,7 @@ func (m model) View() tea.View {
 		label := m.styles.nowPlayingLabel.Render("YOU ARE LISTENING TO")
 		art := m.styles.art.Render(loadASCIIArt())
 		if m.vidIndex == 1 {
-			art = renderShimmerSweep(m.styles.art, loadSynthWave(), time.Now())
+			art = m.shimmer.View()
 		}
 		nowPlaying = lipgloss.JoinVertical(lipgloss.Center, label, art)
 	}

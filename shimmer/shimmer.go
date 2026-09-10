@@ -61,7 +61,7 @@ func nextID() int {
 const (
 	defaultBaseColor            = lipgloss.Color("#F4F1FF")
 	defaultShimmerColor         = lipgloss.Color("#B084FF")
-	defaultShimmerFrameInterval = 80 * time.Millisecond   // ~12.5fps sweep
+	defaultShimmerFrameInterval = 60 * time.Millisecond   // ~12.5fps sweep
 	defaultShimmerDuration      = 1250 * time.Millisecond // time for the band to cross
 	defaultShimmerWaitTime      = 4 * time.Second         // rest between sweeps
 	defaultBandWidth            = 10                      // band half-width, in characters
